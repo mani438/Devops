@@ -1,0 +1,68 @@
+kind: Deployment
+apiVersion: apps/v1
+metadata:
+  name: pgqd
+  namespace: psirt-pgqd-non-prod
+  labels:
+    app.kubernetes.io/managed-by: north-star
+    app.kubernetes.io/name: pgqd
+    softwareId: defbf985167418435f902733a6336c3ef5213c51
+    softwareName: psirt-pgqd
+
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: pgqd
+  template:
+    metadata:
+      namespace: psirt-pgqd-non-prod
+      labels:
+        app: pgqd
+        app.kubernetes.io/managed-by: north-star
+        app.kubernetes.io/name: pgqd
+        environment: dev
+        softwareId: defbf985167418435f902733a6336c3ef5213c51
+        softwareName: psirt-pgqd
+    spec:
+      volumes:
+        - name: pgqd-secret
+          secret:
+            secretName: pgqd-dev-secrets
+            items:
+              - key: psirt-pgqd
+                path: pgqd.ini
+            defaultMode: 420
+      containers:
+        - resources: {}
+          terminationMessagePath: /dev/termination-log
+          name: pgqd
+          command:
+            - /docker-entrypoint.sh
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          imagePullPolicy: Always
+          volumeMounts:
+            - name: pgqd-secret
+              readOnly: true
+              mountPath: /etc/pgqd.ini
+              subPath: pgqd.ini
+          terminationMessagePolicy: File
+          image: 'artifactory.devhub-cloud.cisco.com/pgqd-docker:3.3-almalinux9-v0.0.21'
+          args:
+            - pgqd
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      dnsPolicy: ClusterFirst
+      securityContext: {}
+      imagePullSecrets:
+        - name: artifactory-pgqd-docker-pull-secret
+      schedulerName: default-scheduler
+      strategy:
+        type: RollingUpdate
+        rollingUpdate:
+          maxUnavailable: 25%
+          maxSurge: 25%
+      revisionHistoryLimit: 10
+      progressDeadlineSeconds: 600
