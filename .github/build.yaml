@@ -1,0 +1,65 @@
+name: Build PGQD
+
+on:
+  push:
+    branches: [a-enhance-north-start-docker-build-to-accept-a-pre-build-script]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: # Allows manual triggering
+
+jobs:
+  build-container:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Build Docker Container
+        uses: ns-actions/build-docker@add-prebuild-script-input
+        with:
+          dockerfile_path: .
+          interim_docker_tag: "build/interim_docker_build:build"
+          container_to_upload_name: "docker_image.tar.gz"
+          container_filename: "docker_image.tar.gz"
+          prebuild_script: "docker-prebuild.sh" # Needs to be in .github/workflows/ dir. Script needs to be executable. Should probably do perms sanity check.
+          build_secrets: '{"secretMapKey": "secrets.SECRET_MAP_KEY","dockerSecretName":"wiz_cli_id",${{ secrets.WIZ_CLI_ID}}:"WIZCLI_SECRET","dockerSecretName":"hub"}}'
+          #build_args: '{"VALUE": "arg"}'
+
+  # jobs:
+  #   build-image:
+  #     permissions:
+  #       id-token: write
+  #       actions: read
+  #       contents: write
+  #       pull-requests: write
+  #     uses: ns-actions/docker-build-workflow/.github/workflows/workflow-emu.yml@v2.1.0
+  #     secrets:
+  #       SECRET_MANAGER_USERNAME: ${{ secrets.CONJUR_HOST_PRIV_ID }}
+  #       SECRET_MANAGER_PASSWORD: ${{ secrets.CONJUR_HOST_PRIV_KEY }}
+  #     with:
+  #       secret_manager: conjur
+  #       secret_manager_url: https://conjur-prod.cisco.com
+  #       secret_map: |
+  #         sto/sro-csco-github-actions/github-action-org-secrets/ARTIFACTORY_DOCKER_USER:DOCKER_BUILD_SRC_REPO_USER,
+  #         sto/sro-csco-github-actions/github-action-org-secrets/ARTIFACTORY_STO_CCC_DOCKER_USER:DOCKER_BUILD_SRC_REPO_PW,
+  #         sto/sro-csco-github-actions/github-action-org-secrets/ARTIFACTORY_PGQD_DOCKER_USER:DOCKER_BUILD_DST_REPO_USER,
+  #         sto/sro-csco-github-actions/github-action-org-secrets/ARTIFACTORY_PGQD_DOCKER_PW:DOCKER_BUILD_DST_REPO_PW,
+  #         sto/sro-csco-github-actions/github-action-org-secrets/ARTIFACTORY_DOCKER_USER:DOCKER_REPO_CLOUD9_AUDIT_USER,
+  #         sto/sro-csco-github-actions/github-action-org-secrets/ARTIFACTORY_DOCKER_PW:DOCKER_REPO_CLOUD9_AUDIT_PW,
+  #         sto/sro-csco-github-actions/github-action-org-secrets/CORONA_USERNAME,
+  #         sto/sro-csco-github-actions/github-action-org-secrets/CORONA_PAT,
+  #         sto/sro-csco-github-actions/github-action-org-secrets/SONAR_TOKEN,
+  #         sto/sro-csco-github-actions/github-action-org-secrets/NDEB_TOKEN,
+  #       corona_product_name: PSIRT
+  #       corona_artifact_name: psirt-pgqd
+  #       corona_base_image_product_name: psirt-pgqd
+  #       corona_base_image_release_name: psirt-pgqd
+  #       corona_engineering_contact: sro-dev
+  #       corona_security_contact: sro-dev
+  #       branches_to_run_corona: '["main"]'
+  #       run_wiz: false   # Waiting to hear back from NS team
+  #       docker_build_src_repo: artifactory.devhub-cloud.cisco.com
+  #       docker_build_dst_repo: artifactory.devhub-cloud.cisco.com
+  #       docker_image_name: pgqd-docker/3.3-a1malinux9
+  #       dockerfile_path: apps/psirt/pgqd/images
+  #       webex_room_id: c46917ca-ae6c-11e7-add3-07c2ec9a79b6
