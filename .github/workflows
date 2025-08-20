@@ -1,0 +1,42 @@
+name: Deploy PGQD
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Build PGQD"]
+    types:
+      - completed
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: v1.29.0
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBECONFIG_DATA }}" | base64 --decode > $HOME/.kube/config
+
+      - name: Refresh imagePullSecret
+        run: |
+          kubectl create secret docker-registry artifactory-pgqd-docker-pull-secret \
+            --docker-server=artifactory.devhub-cloud.cisco.com \
+            --docker-username=${{ secrets.ARTIFACTORY_USER }} \
+            --docker-password=${{ secrets.ARTIFACTORY_TOKEN }} \
+            --namespace=default \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Deploy PGQD
+        run: |
+          IMAGE="${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.outputs.image }}"
+          echo "Deploying $IMAGE ..."
+          kubectl set image deployment/pgqd pgqd=$IMAGE --namespace=default
+          kubectl rollout status deployment/pgqd --namespace=default
