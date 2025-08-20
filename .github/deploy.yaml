@@ -33,7 +33,7 @@ jobs:
       - name: Get Conjur secrets
         uses: cisco/conjur-secrets-action@v1
         with:
-          conjur_url: ${{ secrets.CONJUR_URL }}
+          conjur_url: https://conjur-prod.cisco.com
           conjur_account: ${{ secrets.CONJUR_ACCOUNT }}
           conjur_appliance_url: ${{ secrets.CONJUR_APPLIANCE_URL }}
           conjur_access_token: ${{ secrets.CONJUR_ACCESS_TOKEN }}
