@@ -1,0 +1,77 @@
+name: Deploy PGQD
+
+on:
+  push:
+    branches: [ main, 5-helm-chart-for-pgqd ]
+  pull_request:
+    branches: [ main, 5-helm-chart-for-pgqd ]
+  workflow_dispatch:  # Allows manual triggering
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Set up Kubernetes CLI (kubectl) and Helm
+        uses: azure/setup-kubectl@v1
+        with:
+          kubectl-version: 'latest'
+
+      - name: Set up Helm
+        uses: Helm.sh/helm@v3.7.0
+        with:
+          helm-version: 'v3.7.0'
+
+      - name: Configure kubeconfig
+        run: echo "${{ secrets.KUBE_CONFIG }}" > $HOME/.kube/config
+        env:
+          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+
+      - name: Get Conjur secrets
+        uses: cisco/conjur-secrets-action@v1
+        with:
+          conjur_url: ${{ secrets.CONJUR_URL }}
+          conjur_account: ${{ secrets.CONJUR_ACCOUNT }}
+          conjur_appliance_url: ${{ secrets.CONJUR_APPLIANCE_URL }}
+          conjur_access_token: ${{ secrets.CONJUR_ACCESS_TOKEN }}
+        id: conjur_secrets
+
+      - name: Deploy PGQD using Helm on OpenShift
+        run: |
+          helm upgrade --install pgqd-release ./helm/pgqd \
+            --namespace psirt-pgqd-non-prod \
+            --set image.repository=artifactory.devhub-cloud.cisco.com/pgqd-docker \
+            --set image.tag=${{ github.sha }} \
+            --set image.pullSecrets=pgqd-docker-pull-secret \
+            --set conjur.secrets.args="${{ steps.conjur_secrets.outputs.SECRET_VALUE }}"
+        env:
+          CONJUR_SECRET: ${{ steps.conjur_secrets.outputs.SECRET_VALUE }}
+
+      - name: Verify Deployment Status on OpenShift
+        run: |
+          oc rollout status deployment/pgqd -n psirt-pgqd-non-prod
+          echo "Deployment verified successfully."
+
+      - name: Notify Deployment Success
+        if: success()
+        run: |
+          echo "PGQD deployment was successful in namespace psirt-pgqd-non-prod."
+          curl -X POST -H 'Content-type: application/json' --data '{"text":"PGQD deployment was successful."}' <WEBHOOK_URL>
+
+      - name: Notify Deployment Failure
+        if: failure()
+        run: |
+          echo "PGQD deployment failed in namespace psirt-pgqd-non-prod."
+          curl -X POST -H 'Content-type: application/json' --data '{"text":"PGQD deployment failed."}' <WEBHOOK_URL>
+
+      - name: Post-deployment clean up
+        if: always()
+        run: |
+          echo "Post-deployment cleanup started."
+          oc delete deployment pgqd -n psirt-pgqd-non-prod || true
+          oc delete secret pgqd-dev-secrets -n psirt-pgqd-non-prod || true
+          oc delete namespace psirt-pgqd-non-prod || true
+          echo "Post-deployment cleanup completed successfully."
