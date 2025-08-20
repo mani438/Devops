@@ -34,10 +34,14 @@ jobs:
         uses: cisco/conjur-secrets-action@v1
         with:
           conjur_url: https://conjur-prod.cisco.com
-          conjur_account: ${{ secrets.CONJUR_ACCOUNT }}
-          conjur_appliance_url: ${{ secrets.CONJUR_APPLIANCE_URL }}
-          conjur_access_token: ${{ secrets.CONJUR_ACCESS_TOKEN }}
-        id: conjur_secrets
+          secrets:
+  #       SECRET_MANAGER_USERNAME: ${{ secrets.CONJUR_HOST_PRIV_ID }}
+  #       SECRET_MANAGER_PASSWORD: ${{ secrets.CONJUR_HOST_PRIV_KEY }}
+  #     with:
+  #       secret_manager: conjur
+  #       secret_manager_url: https://conjur-prod.cisco.com
+  #       secret_map: |
+  #         sto/sro-csco-github-actions/github-action-org-secrets/artifactory-pgqd-docker-pull-secret/pgqd-secret,
 
       - name: Deploy PGQD using Helm on OpenShift
         run: |
