@@ -1,39 +1,49 @@
 name: Deploy PGQD
 
 on:
+  workflow_dispatch:
   push:
-    branches: [ main, 5-helm-chart-for-pgqd ]
-  pull_request:
-    branches: [ main, 5-helm-chart-for-pgqd ]
-  workflow_dispatch:  # Allows manual triggering
+    branches:
+      - main
+    paths:
+      - 'k8s/deployment.yaml'  # Update if your path differs
+
+permissions:
+  id-token: write
+  contents: read
 
 jobs:
   deploy:
+    name: Deploy to Non-Prod Kubernetes Cluster
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v2
+      - name: Checkout Repository
+        uses: actions/checkout@v4
 
-      - name: Set up Kubernetes CLI (kubectl) and Helm
-        uses: azure/setup-kubectl@v1
-        with:
-          kubectl-version: 'latest'
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/kubectl
+          kubectl version --client
 
-      - name: Set up Helm
-        uses: Helm.sh/helm@v3.7.0
-        with:
-          helm-version: 'v3.7.0'
-
-      - name: Configure kubeconfig
-        run: echo "${{ secrets.KUBE_CONFIG }}" > $HOME/.kube/config
+      - name: Set up Kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${KUBE_CONFIG}" > ~/.kube/config
+          chmod 600 ~/.kube/config
         env:
           KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
 
+      - name: Deploy PGQD Deployment Manifest
+        run: |
+          kubectl apply -f k8s/deployment.yaml
+          
       - name: Get Conjur secrets
         uses: cisco/conjur-secrets-action@v1
         with:
-          conjur_url: https://conjur-prod.cisco.com
+         conjur_url: https://conjur-prod.cisco.com
           secrets:
   #       SECRET_MANAGER_USERNAME: ${{ secrets.CONJUR_HOST_PRIV_ID }}
   #       SECRET_MANAGER_PASSWORD: ${{ secrets.CONJUR_HOST_PRIV_KEY }}
@@ -45,12 +55,11 @@ jobs:
 
       - name: Deploy PGQD using Helm on OpenShift
         run: |
-          helm upgrade --install pgqd-release ./helm/pgqd \
+         helm upgrade --install pgqd ./charts/pgqd \
             --namespace psirt-pgqd-non-prod \
+            --create-namespace \
             --set image.repository=artifactory.devhub-cloud.cisco.com/pgqd-docker \
-            --set image.tag=${{ github.sha }} \
-            --set image.pullSecrets=pgqd-docker-pull-secret \
-            --set conjur.secrets.args="${{ steps.conjur_secrets.outputs.SECRET_VALUE }}"
+            --set image.tag=3.3-almalinux9-v0.0.21
         env:
           CONJUR_SECRET: ${{ steps.conjur_secrets.outputs.SECRET_VALUE }}
 
