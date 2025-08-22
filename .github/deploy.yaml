@@ -21,20 +21,35 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Install kubectl
-        run: |
-          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-          chmod +x kubectl
-          sudo mv kubectl /usr/local/bin/kubectl
-          kubectl version --client
+      - name: Install OpenShift CLI (oc)
+      run: |
+        curl -LO "https://mirror.openshift.com/pub/openshift-v4/clients/oc/latest/linux/oc.tar.gz"
+        tar -xvf oc.tar.gz
+        sudo mv oc /usr/local/bin/
+        oc version --client
 
-      - name: Set up Kubeconfig
-        run: |
-          mkdir -p ~/.kube
-          echo "${KUBE_CONFIG}" > ~/.kube/config
-          chmod 600 ~/.kube/config
-        env:
-          KUBE_CONFIG: ${{ secrets.KUBE_CONFIG }}
+    - name: OpenShift Login
+      run: |
+        oc login "${{ secrets.OPENSHIFT_SERVER }}" --token="${{ secrets.OPENSHIFT_TOKEN }}" --insecure-skip-tls-verify=true
+        oc whoami
+        oc project "${{ secrets.HELM_NAMESPACE }}"
+
+    - name: Install Helm
+      run: |
+        curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+        helm version
+
+    - name: Helm Upgrade/Install
+      run: |
+        helm upgrade --install "${{ secrets.HELM_RELEASE_NAME }}" ./helm-chart \
+          --namespace "${{ secrets.HELM_NAMESPACE }}" \
+          --create-namespace \
+          --wait --timeout 300s
+
+    - name: Helm Test (Optional)
+      run: |
+        helm test "${{ secrets.HELM_RELEASE_NAME }}" --namespace "${{ secrets.HELM_NAMESPACE }}"
+      continue-on-error: true  # In case test fails, job continues
 
       - name: Deploy PGQD Deployment Manifest
         run: |
