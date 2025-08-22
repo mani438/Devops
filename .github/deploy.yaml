@@ -39,17 +39,20 @@ jobs:
         curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
         helm version
 
-    - name: Helm Upgrade/Install
-      run: |
-        helm upgrade --install "${{ secrets.HELM_RELEASE_NAME }}" ./helm-chart \
-          --namespace "${{ secrets.HELM_NAMESPACE }}" \
-          --create-namespace \
-          --wait --timeout 300s
-
     - name: Helm Test (Optional)
       run: |
         helm test "${{ secrets.HELM_RELEASE_NAME }}" --namespace "${{ secrets.HELM_NAMESPACE }}"
       continue-on-error: true  # In case test fails, job continues
+      
+      - name: Deploy PGQD using Helm on OpenShift
+        run: |
+         helm upgrade --install pgqd ./charts/pgqd \
+            --namespace psirt-pgqd-non-prod \
+            --create-namespace \
+            --set image.repository=artifactory.devhub-cloud.cisco.com/pgqd-docker \
+            --set image.tag=3.3-almalinux9-v0.0.21
+        env:
+          CONJUR_SECRET: ${{ steps.conjur_secrets.outputs.SECRET_VALUE }}
 
       - name: Deploy PGQD Deployment Manifest
         run: |
@@ -67,16 +70,6 @@ jobs:
   #       secret_manager_url: https://conjur-prod.cisco.com
   #       secret_map: |
   #         sto/sro-csco-github-actions/github-action-org-secrets/artifactory-pgqd-docker-pull-secret/pgqd-secret,
-
-      - name: Deploy PGQD using Helm on OpenShift
-        run: |
-         helm upgrade --install pgqd ./charts/pgqd \
-            --namespace psirt-pgqd-non-prod \
-            --create-namespace \
-            --set image.repository=artifactory.devhub-cloud.cisco.com/pgqd-docker \
-            --set image.tag=3.3-almalinux9-v0.0.21
-        env:
-          CONJUR_SECRET: ${{ steps.conjur_secrets.outputs.SECRET_VALUE }}
 
       - name: Verify Deployment Status on OpenShift
         run: |
