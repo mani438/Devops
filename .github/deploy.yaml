@@ -1,98 +1,84 @@
-name: Deploy PGQD
+name: Deploy PGQD to OpenShift
 
 on:
-  workflow_dispatch:
   push:
     branches:
-      - main
-    paths:
-      - 'k8s/deployment.yaml'  # Update if your path differs
-
-permissions:
-  id-token: write
-  contents: read
+      - main  # or your desired branch
 
 jobs:
   deploy:
-    name: Deploy to Non-Prod Kubernetes Cluster
+    name: Deploy PGQD on OpenShift
     runs-on: ubuntu-latest
 
+    env:
+      NAMESPACE: psirt-pgqd-non-prod
+      DEPLOYMENT_NAME: pgqd
+
     steps:
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
+      # Install OpenShift CLI
       - name: Install OpenShift CLI (oc)
-      run: |
-        curl -LO "https://mirror.openshift.com/pub/openshift-v4/clients/oc/latest/linux/oc.tar.gz"
-        tar -xvf oc.tar.gz
-        sudo mv oc /usr/local/bin/
-        oc version --client
+        run: |
+          curl -LO https://mirror.openshift.com/pub/openshift-v4/clients/oc/latest/linux/oc.tar.gz
+          tar -xvf oc.tar.gz
+          sudo mv oc /usr/local/bin/
+          oc version --client
 
-    - name: OpenShift Login
-      run: |
-        oc login "${{ secrets.OPENSHIFT_SERVER }}" --token="${{ secrets.OPENSHIFT_TOKEN }}" --insecure-skip-tls-verify=true
-        oc whoami
-        oc project "${{ secrets.HELM_NAMESPACE }}"
+      # Login to OpenShift
+      - name: Authenticate to OpenShift
+        run: |
+          oc login --token=${{ secrets.OPENSHIFT_TOKEN }} --server=${{ secrets.OPENSHIFT_SERVER }} --insecure-skip-tls-verify
+          oc project ${{ env.NAMESPACE }}
 
-    - name: Install Helm
-      run: |
-        curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-        helm version
+      # Install Helm
+      - name: Install Helm
+        run: |
+          curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          helm version
 
-    - name: Helm Test (Optional)
-      run: |
-        helm test "${{ secrets.HELM_RELEASE_NAME }}" --namespace "${{ secrets.HELM_NAMESPACE }}"
-      continue-on-error: true  # In case test fails, job continues
-      
+      # Optional: Helm Chart Linting & Dry Run
+      - name: Helm Lint & Dry Run
+        run: |
+          helm lint ./charts/pgqd
+          helm template pgqd ./charts/pgqd --namespace ${{ env.HELM_NAMESPACE }}
+          helm install pgqd ./charts/pgqd --namespace ${{ env.HELM_NAMESPACE }} --dry-run
+          echo "Helm chart linting and dry-run completed."
+
+      # Helm Install to OpenShift
       - name: Deploy PGQD using Helm on OpenShift
         run: |
-         helm upgrade --install pgqd ./charts/pgqd \
-            --namespace psirt-pgqd-non-prod \
-            --create-namespace \
-            --set image.repository=artifactory.devhub-cloud.cisco.com/pgqd-docker \
-            --set image.tag=3.3-almalinux9-v0.0.21
-        env:
-          CONJUR_SECRET: ${{ steps.conjur_secrets.outputs.SECRET_VALUE }}
+          helm upgrade --install pgqd ./charts/pgqd \
+            --namespace ${{ env.HELM_NAMESPACE }} \
+            --create-namespace
+          echo "PGQD Helm chart deployed successfully."
 
-      - name: Deploy PGQD Deployment Manifest
+      # Apply deployment.yaml
+      - name: Deploy PGQD to OpenShift
         run: |
-          kubectl apply -f k8s/deployment.yaml
-          
-      - name: Get Conjur secrets
-        uses: cisco/conjur-secrets-action@v1
-        with:
-         conjur_url: https://conjur-prod.cisco.com
-          secrets:
-  #       SECRET_MANAGER_USERNAME: ${{ secrets.CONJUR_HOST_PRIV_ID }}
-  #       SECRET_MANAGER_PASSWORD: ${{ secrets.CONJUR_HOST_PRIV_KEY }}
-  #     with:
-  #       secret_manager: conjur
-  #       secret_manager_url: https://conjur-prod.cisco.com
-  #       secret_map: |
-  #         sto/sro-csco-github-actions/github-action-org-secrets/artifactory-pgqd-docker-pull-secret/pgqd-secret,
+          kubectl apply -f deployment.yaml -n ${{ env.NAMESPACE }}
+          echo " Applied PGQD deployment manifest."
 
-      - name: Verify Deployment Status on OpenShift
+      # Wait for rollout to complete
+      - name: Verify Deployment Rollout
         run: |
-          oc rollout status deployment/pgqd -n psirt-pgqd-non-prod
-          echo "Deployment verified successfully."
+          kubectl rollout status deployment/${{ env.DEPLOYMENT_NAME }} -n ${{ env.NAMESPACE }}
 
-      - name: Notify Deployment Success
+      # Verify pods are running
+      - name: Verify Pods Status
+        run: |
+          echo "🔍 Listing pods in namespace ${{ env.NAMESPACE }}:"
+          kubectl get pods -n ${{ env.NAMESPACE }}
+
+      # Success message
+      - name: Deployment Success
         if: success()
-        run: |
-          echo "PGQD deployment was successful in namespace psirt-pgqd-non-prod."
-          curl -X POST -H 'Content-type: application/json' --data '{"text":"PGQD deployment was successful."}' <WEBHOOK_URL>
+        run: echo " PGQD deployment successful in namespace ${{ env.NAMESPACE }}."
 
-      - name: Notify Deployment Failure
+      # Optional: Deployment failure notification
+      - name: Deployment Failure
         if: failure()
         run: |
-          echo "PGQD deployment failed in namespace psirt-pgqd-non-prod."
-          curl -X POST -H 'Content-type: application/json' --data '{"text":"PGQD deployment failed."}' <WEBHOOK_URL>
-
-      - name: Post-deployment clean up
-        if: always()
-        run: |
-          echo "Post-deployment cleanup started."
-          oc delete deployment pgqd -n psirt-pgqd-non-prod || true
-          oc delete secret pgqd-dev-secrets -n psirt-pgqd-non-prod || true
-          oc delete namespace psirt-pgqd-non-prod || true
-          echo "Post-deployment cleanup completed successfully."
+          echo " PGQD deployment failed."
+          kubectl get events -n ${{ env.NAMESPACE }} --sort-by='.lastTimestamp'
