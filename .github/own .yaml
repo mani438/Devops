@@ -1,0 +1,78 @@
+name: PGQD Continuous Deployment
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  helm-test-install:
+    name: Helm Install Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v3
+
+      - name: Lint Helm Chart
+        run: helm lint charts/pgqd
+
+      - name: Helm Install PGQD (dry-run)
+        run: |
+          helm install pgqd charts/pgqd --dry-run --debug
+
+  helm-uninstall:
+    name: Helm Uninstall (Test Clean-up)
+    needs: helm-test-install
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install Helm
+        uses: azure/setup-helm@v3
+
+      - name: Uninstall PGQD Chart
+        run: helm uninstall pgqd || true
+
+  openshift-deploy:
+    name: Deploy to OpenShift (PGQD)
+    needs: [helm-test-install, helm-uninstall]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Fetch Secrets from Conjur
+        id: conjur
+        uses: cyberark/conjur-action@v1
+        with:
+          url: ${{ secrets.CONJUR_URL }}
+          account: ${{ secrets.CONJUR_ACCOUNT }}
+          identity: ${{ secrets.CONJUR_AUTHN_LOGIN }}
+          api_key: ${{ secrets.CONJUR_AUTHN_API_KEY }}
+          secrets: |
+            pgqd/openshift/token
+            pgqd/openshift/user
+            pgqd/openshift/password
+
+      - name: Call Reusable OpenShift Workflow
+        uses: ./.github/workflows/workflow-emu.yml
+        with:
+          deployment_configuration: |
+            {
+              "branch": "main",
+              "tokenKey": "OPENSHIFT_TOKEN",
+              "userEnvRequirementOrders": ["DEPLOYMENT_USER_READ_ONLY"],
+              "usernameKey": "OPENSHIFT_USER",
+              "passwordKey": "OPENSHIFT_PASSWORD_READ_ONLY",
+              "openshiftParameterFiles": ["openshift/pgqd.parameters.json"],
+              "openshiftEnvironmentVariables": ["PGQD_MODE=prod", "DEBUG=false"],
+              "restartDeployments": ["pgqd-app"],
+              "openshiftServer": "caap-rtp-cisco.com",
+              "openshiftProject": "pgqd-namespace",
+              "openshiftConfigFolder": "openshift"
+            }
+        secrets:
+          OPENSHIFT_TOKEN: ${{ steps.conjur.outputs.pgqd__openshift__token }}
+          OPENSHIFT_USER: ${{ steps.conjur.outputs.pgqd__openshift__user }}
+          OPENSHIFT_PASSWORD_READ_ONLY: ${{ steps.conjur.outputs.pgqd__openshift__password }}
