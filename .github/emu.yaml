@@ -1,0 +1,89 @@
+name: OpenShift Workflow - ns-actions
+
+on:
+  workflow_call:
+    inputs:
+      # Deployment Configurations
+      deployment_configuration:
+        type: string
+        required: false
+        description: |
+          This is the recommended way to pass in the deployment configuration.
+          You can also use the inputs for very simple deployments.
+          Either pass the JSON string or the filename to load.
+          It can be passed in as a JSON string or loaded as a JSON string.
+          The deployment configuration for the workflow. This is a JSON string
+          that contains the deployment environments and their corresponding 
+          OpenShift parameter files.
+          Example of a JSON string:
+            {
+              "branch": "main",
+              "tokenKey": "OPENSHIFT_TOKEN",
+              "userEnvRequirementOrders": ["DEPLOYMENT_USER_READ_ONLY"],
+              "usernameKey": "OPENSHIFT_USER",
+              "passwordKey": "OPENSHIFT_PASSWORD_READ_ONLY",
+              "openshiftParameterFiles": ["openshift-deploy-workflow.parameters.json"],
+              "openshiftEnvironmentVariables": ["VAR1=paramValue1", "VAR2=paramValue2"],
+              "restartDeployments": ["deployment1", "deployment2"],
+              "openshiftServer": "caap-rtp-cisco.com",
+              "openshiftProject": "openshift-project",
+              "openshiftConfigFolder": "openshift-deploy-workflow"
+            }
+
+      simple_openshift_config_file:
+        type: string
+        required: false
+        description: |
+          Location of the openshift configuration file. This will just use the raw openshift yaml file.
+          If you need to pass parameters, use the deployment_configuration input.
+
+      simple_openshift_server:
+        type: string
+        required: false
+        description: The OpenShift server to log in to validate and deploy
+
+      simple_openshift_project:
+        type: string
+        required: false
+        description: The OpenShift project to log in to validate and deploy
+
+      simple_deployment_branch:
+        type: string
+        required: false
+        description: The branch to deploy to. Used in PR and deployment environments.
+        default: main
+
+      simple_githubEnvironment:
+        type: string
+        required: false
+        description: |
+          The GitHub environment to use for deployment. Used for setting env in PR and deployment.
+          Must be set for approval-based workflows.
+
+      runs_on:
+        type: object
+        description: |
+          This is a map which contains which runner to use for each job in the workflow.
+          The key is the job name and the value is the runner name for that job.
+          The default runner is ubuntu-22.04 for all jobs.
+        default:
+          test-action: "ubuntu-20.04"
+          unit-test-js: "ubuntu-22.04"
+
+      enable_tagging:
+        type: boolean
+        required: false
+        default: true
+
+      enable_versioning:
+        type: boolean
+        required: false
+        default: true
+        description: |
+          Whether to enable versioning. This will run the versioning job and update the version file.
+          This is only used for non-PR events. For PR events it will always run.
+
+      enable_hooks_validation:
+        type: boolean
+        required: false
+        default: false
