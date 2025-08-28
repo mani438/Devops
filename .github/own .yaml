@@ -41,26 +41,24 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
-
-      - name: Fetch Secrets from Conjur
-        id: conjur
-        uses: cyberark/conjur-action@v1
-        with:
-          url: ${{ secrets.CONJUR_URL }}
-          account: ${{ secrets.CONJUR_ACCOUNT }}
-          identity: ${{ secrets.CONJUR_AUTHN_LOGIN }}
-          api_key: ${{ secrets.CONJUR_AUTHN_API_KEY }}
-          secrets: |
-            pgqd/openshift/token
-            pgqd/openshift/user
-            pgqd/openshift/password
-
+ # jobs:
+  #     uses: ns-actions/docker-build-workflow/.github/workflows/workflow-emu.yml@v2.1.0
+  #     secrets:
+  #       SECRET_MANAGER_USERNAME: ${{ secrets.CONJUR_HOST_PRIV_ID }}
+  #       SECRET_MANAGER_PASSWORD: ${{ secrets.CONJUR_HOST_PRIV_KEY }}
+  #     with:
+  #       secret_manager: conjur
+  #       secret_manager_url: https://conjur-prod.cisco.com
+  #       secret_map: |
+  #         sto/sro-csco-github-actions/github-action-org-secrets/test
+  #         sto/sro-csco-github-actions/github-action-org-secrets/path
+  
       - name: Call Reusable OpenShift Workflow
         uses: ./.github/workflows/workflow-emu.yml
         with:
           deployment_configuration: |
             {
-              "branch": "main",
+              "branch": "5-helmchart-pgqd-nonprod",
               "tokenKey": "OPENSHIFT_TOKEN",
               "userEnvRequirementOrders": ["DEPLOYMENT_USER_READ_ONLY"],
               "usernameKey": "OPENSHIFT_USER",
