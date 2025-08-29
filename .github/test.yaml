@@ -1,37 +1,52 @@
-name: PGQD Deployment to OpenShift
+name: Deploy PGQD on OpenShift
 
 on:
   push:
-    branches: [main]
-  workflow_dispatch:
+    branches: [ main, 5-helm-chart-for-pgqd ]
+  pull_request:
+    branches: [ main, 5-helm-chart-for-pgqd ]
+  workflow_dispatch:  # Allows manual triggering
 
 jobs:
   deploy-pgqd:
     runs-on: ubuntu-22.04
     name: Deploy PGQD
-
     steps:
-      - name: Checkout Repository
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Helm
         uses: azure/setup-helm@v3
         with:
-          version: v3.14.0  # lock to a specific version
+          version: v3.14.0
 
-      - name: Install OC CLI
+      - name: Install oc CLI
         run: |
-          curl -LO https://mirror.openshift.com/pub/openshift-v4/clients/oc/latest/linux/oc.tar.gz
+          curl -LO "https://mirror.openshift.com/pub/openshift-v4/clients/oc/latest/linux/oc.tar.gz"
           echo "SHA256 CHECKING..."
-          echo "your_expected_sha256_here  oc.tar.gz" | sha256sum -c -
+          echo "your_expected_sha256_hash  oc.tar.gz" | sha256sum -c -
           tar -xvf oc.tar.gz
           sudo mv oc /usr/local/bin/
 
+      - name: Fetch Secrets from Conjur
+        run: |
+          # Install conjur CLI
+          pip install conjur-client
+
+          # Login to Conjur
+          conjur init -u ${{ secrets.CONJUR_APPLIANCE_URL }} -a ${{ secrets.CONJUR_ACCOUNT }}
+          conjur authn login -u ${{ secrets.CONJUR_USERNAME }} -p ${{ secrets.CONJUR_API_KEY }}
+
+          # Fetch secrets and export as env vars
+          export OPENSHIFT_TOKEN=$(conjur variable get -i openshift/pgqd/token)
+          export OPENSHIFT_SERVER=$(conjur variable get -i openshift/pgqd/server)
+        shell: bash
+
       - name: Authenticate to OpenShift
         run: |
-          oc login --token="${{ secrets.OPENSHIFT_TOKEN }}" --server="${{ secrets.OPENSHIFT_SERVER }}"
+          oc login --token="$OPENSHIFT_TOKEN" --server="$OPENSHIFT_SERVER"
 
-      - name: Helm Lint & Dry Run
+      - name: Helm Lint & Dry run
         run: |
           helm lint helm/pgqd
           helm template pgqd helm/pgqd --debug
@@ -44,14 +59,13 @@ jobs:
         run: |
           oc rollout status deployment/pgqd -n pgqd --timeout=60s
 
-      - name: Verify Pods Status
+      - name: Verify Pod Status
         run: |
           oc get pods -n pgqd
 
       - name: Deployment Success Notification
         run: echo "✅ PGQD deployed successfully!"
 
-    # Optional: On Failure
     continue-on-error: false
 
   notify-failure:
@@ -60,4 +74,4 @@ jobs:
     needs: deploy-pgqd
     steps:
       - name: Notify Failure
-        run: echo "❌ PGQD deployment failed!"
+        run: echo "❌ PGQD Deployment Failed!"
