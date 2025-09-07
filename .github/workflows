@@ -1,42 +1,111 @@
-name: Deploy PGQD
+name: Deploy pgqd to OpenShift
 
 on:
   workflow_dispatch:
-  workflow_run:
-    workflows: ["Build PGQD"]
-    types:
-      - completed
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pgqd-deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  OPENSHIFT_SERVER: ${{ secrets.OPENSHIFT_SERVER }}   # e.g. https://api.np-rtp-02.cae.cisco.com:6443
+  OPENSHIFT_TOKEN: ${{ secrets.OPENSHIFT_TOKEN }}     # paste the OAuth token from oc login page
+  OPENSHIFT_NAMESPACE: psirt-pgqd-non-prod
+
+  HELM_RELEASE: pgqd
+  HELM_CHART_PATH: ./charts/pgqd   # adjust if your chart lives elsewhere
+
+  IMAGE_REPOSITORY: artifactory.devhub-cloud.cisco.com/pgqd-docker
+  IMAGE_TAG: 3.3-almalinux9-v0.0.21
+  IMAGE_PULL_SECRET_NAME: artifactory-pgqd-docker-pull-secret
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - name: Setup kubectl
-        uses: azure/setup-kubectl@v3
-        with:
-          version: v1.29.0
-
-      - name: Configure kubeconfig
+      - name: Install oc, kubectl, helm
         run: |
-          mkdir -p $HOME/.kube
-          echo "${{ secrets.KUBECONFIG_DATA }}" | base64 --decode > $HOME/.kube/config
+          set -euo pipefail
+          curl -sL https://mirror.openshift.com/pub/openshift-v4/clients/ocp/latest/openshift-client-linux.tar.gz -o oc.tar.gz
+          tar -xzf oc.tar.gz -C /tmp
+          sudo mv /tmp/oc /usr/local/bin/
+          sudo mv /tmp/kubectl /usr/local/bin/
+          curl -sL https://get.helm.sh/helm-v3.12.0-linux-amd64.tar.gz -o helm.tar.gz
+          tar -xzf helm.tar.gz
+          sudo mv linux-amd64/helm /usr/local/bin/
+          helm version --short
 
-      - name: Refresh imagePullSecret
+      - name: oc login
         run: |
-          kubectl create secret docker-registry artifactory-pgqd-docker-pull-secret \
-            --docker-server=artifactory.devhub-cloud.cisco.com \
-            --docker-username=${{ secrets.ARTIFACTORY_USER }} \
-            --docker-password=${{ secrets.ARTIFACTORY_TOKEN }} \
-            --namespace=default \
-            --dry-run=client -o yaml | kubectl apply -f -
+          oc login --server="${OPENSHIFT_SERVER}" --token="${OPENSHIFT_TOKEN}"
+          oc project "${OPENSHIFT_NAMESPACE}"
 
-      - name: Deploy PGQD
+      - name: Ensure imagePullSecret exists
+        env:
+          IMAGE_PULL_SECRET_NAME: ${{ env.IMAGE_PULL_SECRET_NAME }}
+          OPENSHIFT_NAMESPACE: ${{ env.OPENSHIFT_NAMESPACE }}
+          ARTIFACTORY_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+          ARTIFACTORY_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
         run: |
-          IMAGE="${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.outputs.image }}"
-          echo "Deploying $IMAGE ..."
-          kubectl set image deployment/pgqd pgqd=$IMAGE --namespace=default
-          kubectl rollout status deployment/pgqd --namespace=default
+          set -euo pipefail
+          if oc get secret "${IMAGE_PULL_SECRET_NAME}" -n "${OPENSHIFT_NAMESPACE}" >/dev/null 2>&1; then
+            echo "Secret already exists."
+          else
+            echo "Creating imagePullSecret ${IMAGE_PULL_SECRET_NAME}"
+            oc create secret docker-registry "${IMAGE_PULL_SECRET_NAME}" \
+              --docker-server=artifactory.devhub-cloud.cisco.com \
+              --docker-username="${ARTIFACTORY_USERNAME}" \
+              --docker-password="${ARTIFACTORY_PASSWORD}" \
+              -n "${OPENSHIFT_NAMESPACE}"
+            oc secrets link default "${IMAGE_PULL_SECRET_NAME}" --for=pull -n "${OPENSHIFT_NAMESPACE}"
+          fi
+
+      - name: Helm lint
+        run: |
+          helm lint "${HELM_CHART_PATH}" \
+            --set image.repository="${IMAGE_REPOSITORY}" \
+            --set image.tag="${IMAGE_TAG}"
+
+      - name: Helm template validate
+        run: |
+          helm template "${HELM_RELEASE}" "${HELM_CHART_PATH}" \
+            --namespace "${OPENSHIFT_NAMESPACE}" \
+            --set image.repository="${IMAGE_REPOSITORY}" \
+            --set image.tag="${IMAGE_TAG}" \
+            --set imagePullSecrets[0].name="${IMAGE_PULL_SECRET_NAME}" \
+            --set app.kubernetes.io/managed-by="north-star" \
+            --set app.kubernetes.io/name="pgqd" \
+            --set environment="dev" > rendered.yaml
+
+          kubectl apply --dry-run=client -f rendered.yaml
+
+      - name: Helm upgrade --install
+        run: |
+          helm upgrade --install "${HELM_RELEASE}" "${HELM_CHART_PATH}" \
+            --namespace "${OPENSHIFT_NAMESPACE}" \
+            --create-namespace \
+            --set image.repository="${IMAGE_REPOSITORY}" \
+            --set image.tag="${IMAGE_TAG}" \
+            --set imagePullSecrets[0].name="${IMAGE_PULL_SECRET_NAME}" \
+            --set app.kubernetes.io/managed-by="north-star" \
+            --set app.kubernetes.io/name="pgqd" \
+            --set environment="dev" \
+            --wait --timeout 10m --atomic
+
+      - name: Verify rollout
+        run: |
+          oc get pods -n "${OPENSHIFT_NAMESPACE}" -o wide
+          for d in $(oc get deploy -n "${OPENSHIFT_NAMESPACE}" -l app.kubernetes.io/name=pgqd -o name); do
+            oc rollout status -n "${OPENSHIFT_NAMESPACE}" "$d" --watch
+          done
