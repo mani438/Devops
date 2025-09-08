@@ -52,7 +52,7 @@ jobs:
       - name: Login to OpenShift with SA token
         run: |
           echo "🔑 Logging into OpenShift with ServiceAccount..."
-          oc login --server="${OPENSHIFT_SERVER}" --token="${OPENSHIFT_SA_TOKEN}" --insecure-skip-tls-verify
+          oc login --server="${OPENSHIFT_SERVER}" --token="${OPENSHIFT_SA_TOKEN}"
           oc project $NAMESPACE
 
       - name: Ensure imagePullSecret
@@ -89,19 +89,19 @@ jobs:
             --set environment=$ENVIRONMENT \
             --wait --timeout 10m --atomic
 
-      # ✅ Deployment + Pod status check
+      #  Deployment + Pod status check
       - name: Verify deployment + pods (dev)
         run: |
-          echo "🔍 Checking rollout for $RELEASE in $NAMESPACE..."
+          echo "Checking rollout for $RELEASE in $NAMESPACE..."
           oc rollout status -n $NAMESPACE deploy/$RELEASE || true
 
           echo "📦 Deployment details:"
           oc get deploy $RELEASE -n $NAMESPACE -o wide || true
 
-          echo "🐳 Pods status:"
+          echo "Pods status:"
           oc get pods -n $NAMESPACE -o wide || true
 
-          echo "📝 Describe failing pods:"
+          echo "Describe failing pods:"
           for p in $(oc get pods -n $NAMESPACE -l app.kubernetes.io/name=pgqd -o name); do
             STATUS=$(oc get $p -n $NAMESPACE -o jsonpath='{.status.phase}')
             if [ "$STATUS" != "Running" ]; then
