@@ -1,33 +1,58 @@
-name: Deploy pgqd (dev)
+name: Build & Deploy PGQD
 
 on:
-  workflow_dispatch:
-    inputs:
-      image_tag:
-        description: "Image tag to deploy to dev"
-        required: true
   push:
-    branches: [ main ]
+    branches: [ main, s-helm-chart-for-pgqd ]
+  pull_request:
+    branches: [ main, s-helm-chart-for-pgqd ]
+  workflow_dispatch:
 
 env:
   RELEASE: pgqd
   NAMESPACE: psirt-pgqd-non-prod
-  CHART_PATH: ./charts/pgqd
+  CHART_PATH: ./psirt/pgqd/images/app/templates/deployment.yaml
   IMAGE_REPOSITORY: artifactory.devhub-cloud.cisco.com/pgqd-docker
   IMAGE_PULL_SECRET: artifactory-pgqd-docker-pull-secret
   ENVIRONMENT: dev
 
 jobs:
-  deploy-dev:
+  build:
+    name: Build Docker Image
+    runs-on: ubuntu-22.04
+    permissions:
+      id-token: write
+      actions: read
+      contents: write
+      pull-requests: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v2
+
+      - name: Set image tag
+        id: meta
+        run: |
+          IMAGE_TAG="pgqd-$(date +'%Y%m%d%H%M%S')"
+          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+
+      - name: Build Docker Image
+        run: |
+          echo "Building Docker image with tag: ${{ steps.meta.outputs.image_tag }}"
+          docker build -t $IMAGE_REPOSITORY:${{ steps.meta.outputs.image_tag }} .
+
+  deploy:
+    name: Deploy to OpenShift
+    needs: build
     runs-on: ubuntu-22.04
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v2
 
-      # 🔐 Load secrets from Conjur
       - name: Load Conjur Secrets
-        id: conjur
         uses: cyberark/conjur-action@v2
         with:
           conjur-url: https://conjur-prod.cisco.com
@@ -40,18 +65,8 @@ jobs:
             sto/sro-csco-github-actions/github-action-org-secrets/ARTIFACTORY_DOCKER_USER:ARTIFACTORY_USERNAME
             sto/sro-csco-github-actions/github-action-org-secrets/ARTIFACTORY_DOCKER_PASS:ARTIFACTORY_PASSWORD
 
-      - name: Install oc + helm
+      - name: Login to OpenShift
         run: |
-          curl -sL https://mirror.openshift.com/pub/openshift-v4/clients/ocp/latest/openshift-client-linux.tar.gz \
-            | tar -xz -C /tmp
-          sudo mv /tmp/oc /usr/local/bin/
-          curl -sL https://get.helm.sh/helm-v3.12.0-linux-amd64.tar.gz \
-            | tar -xz -C /tmp
-          sudo mv /tmp/linux-amd64/helm /usr/local/bin/
-
-      - name: Login to OpenShift with SA token
-        run: |
-          echo "🔑 Logging into OpenShift with ServiceAccount..."
           oc login --server="${OPENSHIFT_SERVER}" --token="${OPENSHIFT_SA_TOKEN}"
           oc project $NAMESPACE
 
@@ -69,44 +84,28 @@ jobs:
       - name: Helm lint + dry-run
         run: |
           helm lint $CHART_PATH \
-            --set image.repository=$IMAGE_REPOSITORY,image.tag=${{ github.event.inputs.image_tag }}
+            --set image.repository=$IMAGE_REPOSITORY,image.tag=${{ needs.build.outputs.image_tag }}
           helm template $RELEASE $CHART_PATH \
             --namespace $NAMESPACE \
-            --set image.repository=$IMAGE_REPOSITORY,image.tag=${{ github.event.inputs.image_tag }} \
+            --set image.repository=$IMAGE_REPOSITORY,image.tag=${{ needs.build.outputs.image_tag }} \
             --set imagePullSecrets[0].name=$IMAGE_PULL_SECRET \
             --set app.kubernetes.io/managed-by=north-star \
             --set app.kubernetes.io/name=pgqd \
             --set environment=$ENVIRONMENT | kubectl apply --dry-run=client -f -
 
-      - name: Helm upgrade --install (dev)
+      - name: Helm upgrade --install
         run: |
           helm upgrade --install $RELEASE $CHART_PATH \
             --namespace $NAMESPACE --create-namespace \
-            --set image.repository=$IMAGE_REPOSITORY,image.tag=${{ github.event.inputs.image_tag }} \
+            --set image.repository=$IMAGE_REPOSITORY,image.tag=${{ needs.build.outputs.image_tag }} \
             --set imagePullSecrets[0].name=$IMAGE_PULL_SECRET \
             --set app.kubernetes.io/managed-by=north-star \
             --set app.kubernetes.io/name=pgqd \
             --set environment=$ENVIRONMENT \
             --wait --timeout 10m --atomic
 
-      #  Deployment + Pod status check
-      - name: Verify deployment + pods (dev)
+      - name: Verify rollout
         run: |
-          echo "Checking rollout for $RELEASE in $NAMESPACE..."
           oc rollout status -n $NAMESPACE deploy/$RELEASE || true
-
-          echo "📦 Deployment details:"
           oc get deploy $RELEASE -n $NAMESPACE -o wide || true
-
-          echo "Pods status:"
           oc get pods -n $NAMESPACE -o wide || true
-
-          echo "Describe failing pods:"
-          for p in $(oc get pods -n $NAMESPACE -l app.kubernetes.io/name=pgqd -o name); do
-            STATUS=$(oc get $p -n $NAMESPACE -o jsonpath='{.status.phase}')
-            if [ "$STATUS" != "Running" ]; then
-              echo "------ $p ------"
-              oc describe $p -n $NAMESPACE || true
-              oc logs $p -n $NAMESPACE --tail=50 || true
-            fi
-          done
