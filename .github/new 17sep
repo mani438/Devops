@@ -1,0 +1,133 @@
+name: Openshift Deploy Workflow
+
+on:
+  workflow_call:
+    inputs:
+      namespace:
+        description: "Target OpenShift namespace"
+        required: true
+        type: string
+      release:
+        description: "Helm release name"
+        required: true
+        type: string
+      chart_path:
+        description: "Path to Helm chart"
+        required: true
+        type: string
+      image_repository:
+        description: "Docker image repository"
+        required: true
+        type: string
+      environment:
+        description: "Deployment environment (e.g., dev, stage, prod)"
+        required: true
+        type: string
+      image_pull_secret:
+        description: "Kubernetes secret name for pulling images"
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    permissions:
+      pull-requests: write
+    outputs:
+      image_tag: ${{ steps.meta.outputs.image_tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Load Conjur Secrets
+        id: conjur
+        uses: ns-actions/docker-build-workflow/.github/workflows/workflow-emu.yml@v2.1.0
+        with:
+          secret_manager: conjur
+          secret_manager_url: https://conjur-prod.cisco.com
+          secret_map: |
+            sto/sro-csco-github-actions/github-action-org-secrets/ARIFACTORY_DOCKER_USER:DOCKER_BUILD_SRC_REPO_USER,
+            sto/sro-csco-github-actions/github-action-org-secrets/ARIFACTORY_STO_CCC_DOCKER_TOKEN:DOCKER_BUILD_SRC_REPO_TOKEN,
+            sto/sro-csco-github-actions/github-action-org-secrets/ARIFACTORY_PGOD_DOCKER_TOKEN:DOCKER_BUILD_DST_REPO_TOKEN
+
+      - name: Build Docker Image
+        id: meta
+        run: |
+          set -eo pipefail
+          IMAGE_TAG=$(date +"%Y%m%d%H%M")
+          echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
+          echo "Building image with tag: $IMAGE_TAG"
+
+  deploy:
+    name: Rotate Token & Deploy to OpenShift
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Load Conjur Secrets
+        uses: ns-actions/docker-build-workflow/.github/workflows/workflow-emu.yml@v2.1.0
+        with:
+          secret_manager: conjur
+          secret_manager_url: https://conjur-prod.cisco.com
+          secret_map: |
+            sto/sro-csco-github-actions/github-action-org-secrets/OPENSHIFT_SERVER:OPENSHIFT_SERVER,
+            sto/sro-csco-github-actions/github-action-org-secrets/OPENSHIFT_SA_TOKEN:OPENSHIFT_SA_TOKEN,
+            sto/sro-csco-github-actions/github-action-org-secrets/ARIFACTORY_USERNAME:ARIFACTORY_USERNAME,
+            sto/sro-csco-github-actions/github-action-org-secrets/ARIFACTORY_PGOD_DOCKER_TOKEN:ARIFACTORY_PASSWORD
+
+      - name: Login to OpenShift
+        run: |
+          oc login --server="${{ secrets.OPENSHIFT_SERVER }}" --token="${{ secrets.OPENSHIFT_SA_TOKEN }}"
+
+      - name: Set Project Namespace
+        run: oc project "${{ inputs.namespace }}"
+
+      - name: Ensure Image Pull Secret Exists
+        run: |
+          if ! oc get secret "${{ inputs.image_pull_secret }}" -n "${{ inputs.namespace }}" >/dev/null 2>&1; then
+            oc create secret docker-registry "${{ inputs.image_pull_secret }}" \
+              --docker-server=artifactory.devhub-cloud.cisco.com \
+              --docker-username="${{ secrets.ARIFACTORY_USERNAME }}" \
+              --docker-password="${{ secrets.ARIFACTORY_PASSWORD }}" \
+              -n "${{ inputs.namespace }}"
+          fi
+          oc secrets link default "${{ inputs.image_pull_secret }}" --for=pull -n "${{ inputs.namespace }}"
+
+      - name: Helm Lint + Dry Run
+        run: |
+          helm template "${{ inputs.release }}" "${{ inputs.chart_path }}" \
+            --namespace "${{ inputs.namespace }}" \
+            --set image.repository="${{ inputs.image_repository }}",image.tag="${{ needs.build.outputs.image_tag }}" \
+            --set imagePullSecrets[0].name="${{ inputs.image_pull_secret }}" \
+            --set environment="${{ inputs.environment }}"
+
+      - name: Helm Upgrade
+        run: |
+          helm upgrade --install "${{ inputs.release }}" "${{ inputs.chart_path }}" \
+            --namespace "${{ inputs.namespace }}" --create-namespace \
+            --set image.repository="${{ inputs.image_repository }}",image.tag="${{ needs.build.outputs.image_tag }}" \
+            --set imagePullSecrets[0].name="${{ inputs.image_pull_secret }}" \
+            --set environment="${{ inputs.environment }}" \
+            --wait --timeout 5m --atomic
+
+      - name: Verify Deployment
+        run: |
+          echo "Checking rollout for ${{ inputs.release }} in ${{ inputs.namespace }}..."
+          oc rollout status -n "${{ inputs.namespace }}" deployment/"${{ inputs.release }}"
+
+          echo "Pod Status:"
+          oc get pods -n "${{ inputs.namespace }}" -o wide
+
+          for p in $(oc get pods -n "${{ inputs.namespace }}" -l app.kubernetes.io/name=${{ inputs.release }} -o name); do
+            STATUS=$(oc get "$p" -n "${{ inputs.namespace }}" -o jsonpath="{.status.phase}")
+            if [ "$STATUS" != "Running" ]; then
+              echo "Non-running pod: $p"
+              oc describe "$p" -n "${{ inputs.namespace }}"
+              oc logs "$p" -n "${{ inputs.namespace }}" --tail=50
+            fi
+          done
