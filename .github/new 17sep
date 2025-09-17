@@ -3,7 +3,7 @@ name: PGQD CI-CD Pipeline
 on:
   push:
     branches:
-      - a-enhance-north-start-docker-build-to-accept-a-pre-build-script
+      - 5-helm-chart-non-prod
   pull_request:
     branches:
       - main
