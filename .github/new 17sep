@@ -3,50 +3,72 @@ name: PGQD CI-CD Pipeline
 on:
   push:
     branches:
+      - a-enhance-north-start-docker-build-to-accept-a-pre-build-script
+  pull_request:
+    branches:
       - main
-      - 5-helmchart-pgqd-nonprod
   workflow_dispatch:
 
 jobs:
-  build:
-    name: Build PGQD Docker Image
-    runs-on: ubuntu-22.04
+  build-image:
+    name: Build & Push Image
     permissions:
+      id-token: write
+      actions: read
+      contents: write
       pull-requests: write
+    uses: ns-actions/docker-build-workflow/.github/workflows/workflow-emu.yml@v2.1.0
+    secrets:
+      SECRET_MANAGER_USERNAME: ${{ secrets.CONJUR_HOST_PRIV_ID }}
+      SECRET_MANAGER_PASSWORD: ${{ secrets.CONJUR_HOST_PRIV_KEY }}
+    with:
+      secret_manager: conjur
+      secret_manager_url: https://conjur-prod.cisco.com
+      secret_map: |
+        sto/sro-csco-github-actions/github-action-org-secrets/ARTIFACTORY_DOCKER_USER:DOCKER_BUILD_SRC_REPO_USER,
+        sto/sro-csco-github-actions/github-action-org-secrets/ARTIFACTORY_STO_CCC_DOCKER_USER:DOCKER_BUILD_SRC_REPO_PW,
+        sto/sro-csco-github-actions/github-action-org-secrets/ARTIFACTORY_PGQD_DOCKER_USER:DOCKER_BUILD_DST_REPO_USER,
+        sto/sro-csco-github-actions/github-action-org-secrets/ARTIFACTORY_PGQD_DOCKER_PW:DOCKER_BUILD_DST_REPO_PW,
+        sto/sro-csco-github-actions/github-action-org-secrets/ARTIFACTORY_DOCKER_USER:DOCKER_REPO_CLOUD9_AUDIT_USER,
+        sto/sro-csco-github-actions/github-action-org-secrets/ARTIFACTORY_DOCKER_PW:DOCKER_REPO_CLOUD9_AUDIT_PW,
+        sto/sro-csco-github-actions/github-action-org-secrets/CORONA_USERNAME,
+        sto/sro-csco-github-actions/github-action-org-secrets/CORONA_PAT,
+        sto/sro-csco-github-actions/github-action-org-secrets/SONAR_TOKEN,
+        sto/sro-csco-github-actions/github-action-org-secrets/NDEB_TOKEN
+      corona_product_name: PSIRT
+      corona_artifact_name: psirt-pgqd
+      corona_base_image_product_name: psirt-pgqd
+      corona_base_image_release_name: psirt-pgqd
+      corona_engineering_contact: sro-dev
+      corona_security_contact: sro-dev
+      branches_to_run_corona: '["main"]'
+      run_wiz: false
+      docker_build_src_repo: artifactory.devhub-cloud.cisco.com
+      docker_build_dst_repo: artifactory.devhub-cloud.cisco.com
+      docker_image_name: pgqd-docker/3.3-almalinux9
+      dockerfile_path: apps/psirt/pgqd/images
+      webex_room_id: c46917ca-ae6c-11e7-add3-07c2ec9a79b6
+
+    # 👇 capture the image tag and pass it to later jobs
     outputs:
       image_tag: ${{ steps.meta.outputs.image_tag }}
 
     steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v3
-
-      - name: Load Conjur Secrets
-        id: conjur
-        uses: ns-actions/docker-build-workflow/.github/workflows/workflow-emu.yml@v2.1.0
-        with:
-          secret_manager: conjur
-          secret_manager_url: https://conjur-prod.cisco.com
-          secret_map: |
-            sto/sro-csco-github-actions/github-action-org-secrets/ARIFACTORY_DOCKER_USER:DOCKER_BUILD_SRC_REPO_USER,
-            sto/sro-csco-github-actions/github-action-org-secrets/ARIFACTORY_STO_CCC_DOCKER_TOKEN:DOCKER_BUILD_SRC_REPO_TOKEN,
-            sto/sro-csco-github-actions/github-action-org-secrets/ARIFACTORY_PGQD_DOCKER_TOKEN:DOCKER_BUILD_DST_REPO_TOKEN
-
-      - name: Build Docker Image
+      - name: Generate Image Tag
         id: meta
         run: |
-          set -eo pipefail
           IMAGE_TAG=$(date +"%Y%m%d%H%M")
           echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
-          echo "✅ Built PGQD image with tag: $IMAGE_TAG"
+          echo "✅ Generated tag: $IMAGE_TAG"
 
   deploy:
-    name: Deploy PGQD to OpenShift
-    needs: build
+    name: Deploy to OpenShift
     runs-on: ubuntu-22.04
+    needs: build-image
     timeout-minutes: 30
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout Code
         uses: actions/checkout@v3
 
       - name: Load Conjur Secrets
@@ -58,44 +80,59 @@ jobs:
             sto/sro-csco-github-actions/github-action-org-secrets/OPENSHIFT_SERVER:OPENSHIFT_SERVER,
             sto/sro-csco-github-actions/github-action-org-secrets/OPENSHIFT_SA_TOKEN:OPENSHIFT_SA_TOKEN,
             sto/sro-csco-github-actions/github-action-org-secrets/ARIFACTORY_USERNAME:ARIFACTORY_USERNAME,
-            sto/sro-csco-github-actions/github-action-org-secrets/ARIFACTORY_PGOD_DOCKER_TOKEN:ARIFACTORY_PASSWORD
+            sto/sro-csco-github-actions/github-action-org-secrets/ARIFACTORY_PGQD_DOCKER_PW:ARIFACTORY_PASSWORD
 
       - name: Login to OpenShift
         run: |
-          echo "🔑 Logging into OpenShift..."
+          set -euo pipefail
           oc login --server="${{ secrets.OPENSHIFT_SERVER }}" --token="${{ secrets.OPENSHIFT_SA_TOKEN }}"
 
-      - name: Set Namespace
+      - name: Set Project Namespace
         run: oc project psirt-pgqd-non-prod
 
-      - name: Ensure Image Pull Secret
+      - name: Ensure Image Pull Secret Exists
         run: |
-          SECRET_NAME="artifactory-pgqd-docker-pull-secret"
-          if ! oc get secret "$SECRET_NAME" -n psirt-pgqd-non-prod >/dev/null 2>&1; then
-            oc create secret docker-registry "$SECRET_NAME" \
+          IMAGE_PULL_SECRET="artifactory-pgqd-docker-pull-secret"
+          if ! oc get secret "$IMAGE_PULL_SECRET" -n psirt-pgqd-non-prod >/dev/null 2>&1; then
+            oc create secret docker-registry "$IMAGE_PULL_SECRET" \
               --docker-server=artifactory.devhub-cloud.cisco.com \
               --docker-username="${{ secrets.ARIFACTORY_USERNAME }}" \
               --docker-password="${{ secrets.ARIFACTORY_PASSWORD }}" \
               -n psirt-pgqd-non-prod
           fi
-          oc secrets link default "$SECRET_NAME" --for=pull -n psirt-pgqd-non-prod
+          oc secrets link default "$IMAGE_PULL_SECRET" --for=pull -n psirt-pgqd-non-prod
 
-      - name: Update Deployment with New Image
+      - name: Helm Lint + Dry Run
         run: |
-          echo "🚀 Updating pgqd deployment with new image..."
-          NEW_IMAGE="artifactory.devhub-cloud.cisco.com/pgqd-docker:${{ needs.build.outputs.image_tag }}"
-          oc set image deployment/pgqd pgqd=$NEW_IMAGE -n psirt-pgqd-non-prod
-          oc rollout status deployment/pgqd -n psirt-pgqd-non-prod
+          helm template pgqd ./helm/pgqd \
+            --namespace psirt-pgqd-non-prod \
+            --set image.repository=artifactory.devhub-cloud.cisco.com/pgqd-docker/3.3-almalinux9 \
+            --set image.tag="${{ needs.build-image.outputs.image_tag }}" \
+            --set imagePullSecrets[0].name=artifactory-pgqd-docker-pull-secret \
+            --set environment=dev
+
+      - name: Helm Upgrade & Deploy
+        run: |
+          helm upgrade --install pgqd ./helm/pgqd \
+            --namespace psirt-pgqd-non-prod --create-namespace \
+            --set image.repository=artifactory.devhub-cloud.cisco.com/pgqd-docker/3.3-almalinux9 \
+            --set image.tag="${{ needs.build-image.outputs.image_tag }}" \
+            --set imagePullSecrets[0].name=artifactory-pgqd-docker-pull-secret \
+            --set environment=dev \
+            --wait --timeout 5m --atomic
 
       - name: Verify Deployment
         run: |
-          echo "🔍 Verifying pods in psirt-pgqd-non-prod..."
+          echo "Checking rollout for pgqd in psirt-pgqd-non-prod..."
+          oc rollout status -n psirt-pgqd-non-prod deployment/pgqd
+
+          echo "Pod Status:"
           oc get pods -n psirt-pgqd-non-prod -o wide
 
           for p in $(oc get pods -n psirt-pgqd-non-prod -l app=pgqd -o name); do
             STATUS=$(oc get "$p" -n psirt-pgqd-non-prod -o jsonpath="{.status.phase}")
             if [ "$STATUS" != "Running" ]; then
-              echo "⚠️ Pod not running: $p"
+              echo "❌ Non-running pod: $p"
               oc describe "$p" -n psirt-pgqd-non-prod
               oc logs "$p" -n psirt-pgqd-non-prod --tail=50
             fi
