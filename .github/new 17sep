@@ -3,7 +3,8 @@ name: CI-CD Pipeline
 on:
   push:
     branches:
-      - dev
+      - main
+      - 5-helmchart-pgqd-nonprod
   workflow_dispatch:
 
 jobs:
