@@ -1,4 +1,4 @@
-name: CI-CD Pipeline
+name: PGQD CI-CD Pipeline
 
 on:
   push:
@@ -9,11 +9,10 @@ on:
 
 jobs:
   build:
-    name: Build Docker Image
+    name: Build PGQD Docker Image
     runs-on: ubuntu-22.04
     permissions:
       pull-requests: write
-
     outputs:
       image_tag: ${{ steps.meta.outputs.image_tag }}
 
@@ -30,7 +29,7 @@ jobs:
           secret_map: |
             sto/sro-csco-github-actions/github-action-org-secrets/ARIFACTORY_DOCKER_USER:DOCKER_BUILD_SRC_REPO_USER,
             sto/sro-csco-github-actions/github-action-org-secrets/ARIFACTORY_STO_CCC_DOCKER_TOKEN:DOCKER_BUILD_SRC_REPO_TOKEN,
-            sto/sro-csco-github-actions/github-action-org-secrets/ARIFACTORY_PGOD_DOCKER_TOKEN:DOCKER_BUILD_DST_REPO_TOKEN
+            sto/sro-csco-github-actions/github-action-org-secrets/ARIFACTORY_PGQD_DOCKER_TOKEN:DOCKER_BUILD_DST_REPO_TOKEN
 
       - name: Build Docker Image
         id: meta
@@ -38,10 +37,10 @@ jobs:
           set -eo pipefail
           IMAGE_TAG=$(date +"%Y%m%d%H%M")
           echo "image_tag=$IMAGE_TAG" >> $GITHUB_OUTPUT
-          echo "✅ Built image with tag: $IMAGE_TAG"
+          echo "✅ Built PGQD image with tag: $IMAGE_TAG"
 
   deploy:
-    name: Deploy to OpenShift (Dev)
+    name: Deploy PGQD to OpenShift
     needs: build
     runs-on: ubuntu-22.04
     timeout-minutes: 30
@@ -63,55 +62,41 @@ jobs:
 
       - name: Login to OpenShift
         run: |
-          echo "🔑 Logging into OpenShift with ServiceAccount..."
+          echo "🔑 Logging into OpenShift..."
           oc login --server="${{ secrets.OPENSHIFT_SERVER }}" --token="${{ secrets.OPENSHIFT_SA_TOKEN }}"
 
-      - name: Set Project Namespace
-        run: |
-          oc project "dev"
+      - name: Set Namespace
+        run: oc project psirt-pgqd-non-prod
 
-      - name: Ensure Image Pull Secret Exists
+      - name: Ensure Image Pull Secret
         run: |
-          IMAGE_PULL_SECRET="pgod-dev-pull-secret"
-          if ! oc get secret "$IMAGE_PULL_SECRET" -n dev >/dev/null 2>&1; then
-            oc create secret docker-registry "$IMAGE_PULL_SECRET" \
+          SECRET_NAME="artifactory-pgqd-docker-pull-secret"
+          if ! oc get secret "$SECRET_NAME" -n psirt-pgqd-non-prod >/dev/null 2>&1; then
+            oc create secret docker-registry "$SECRET_NAME" \
               --docker-server=artifactory.devhub-cloud.cisco.com \
               --docker-username="${{ secrets.ARIFACTORY_USERNAME }}" \
               --docker-password="${{ secrets.ARIFACTORY_PASSWORD }}" \
-              -n dev
+              -n psirt-pgqd-non-prod
           fi
-          oc secrets link default "$IMAGE_PULL_SECRET" --for=pull -n dev
+          oc secrets link default "$SECRET_NAME" --for=pull -n psirt-pgqd-non-prod
 
-      - name: Helm Lint + Dry Run
+      - name: Update Deployment with New Image
         run: |
-          helm template pgod charts/pgod \
-            --namespace dev \
-            --set image.repository="artifactory.devhub-cloud.cisco.com/pgod",image.tag="${{ needs.build.outputs.image_tag }}" \
-            --set imagePullSecrets[0].name="pgod-dev-pull-secret" \
-            --set environment="dev"
-
-      - name: Helm Upgrade & Deploy
-        run: |
-          helm upgrade --install pgod charts/pgod \
-            --namespace dev --create-namespace \
-            --set image.repository="artifactory.devhub-cloud.cisco.com/pgod",image.tag="${{ needs.build.outputs.image_tag }}" \
-            --set imagePullSecrets[0].name="pgod-dev-pull-secret" \
-            --set environment="dev" \
-            --wait --timeout 5m --atomic
+          echo "🚀 Updating pgqd deployment with new image..."
+          NEW_IMAGE="artifactory.devhub-cloud.cisco.com/pgqd-docker:${{ needs.build.outputs.image_tag }}"
+          oc set image deployment/pgqd pgqd=$NEW_IMAGE -n psirt-pgqd-non-prod
+          oc rollout status deployment/pgqd -n psirt-pgqd-non-prod
 
       - name: Verify Deployment
         run: |
-          echo "🔍 Checking rollout for pgod in dev..."
-          oc rollout status -n dev deployment/pgod
+          echo "🔍 Verifying pods in psirt-pgqd-non-prod..."
+          oc get pods -n psirt-pgqd-non-prod -o wide
 
-          echo "📦 Pod Status:"
-          oc get pods -n dev -o wide
-
-          for p in $(oc get pods -n dev -l app.kubernetes.io/name=pgod -o name); do
-            STATUS=$(oc get "$p" -n dev -o jsonpath="{.status.phase}")
+          for p in $(oc get pods -n psirt-pgqd-non-prod -l app=pgqd -o name); do
+            STATUS=$(oc get "$p" -n psirt-pgqd-non-prod -o jsonpath="{.status.phase}")
             if [ "$STATUS" != "Running" ]; then
-              echo "⚠️ Non-running pod: $p"
-              oc describe "$p" -n dev
-              oc logs "$p" -n dev --tail=50
+              echo "⚠️ Pod not running: $p"
+              oc describe "$p" -n psirt-pgqd-non-prod
+              oc logs "$p" -n psirt-pgqd-non-prod --tail=50
             fi
           done
