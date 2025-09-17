@@ -6,7 +6,7 @@ on:
       - 5-helm-chart-non-prod
   pull_request:
     branches:
-      - main
+      - 5-helm-chart-non-prod
   workflow_dispatch:
 
 jobs:
