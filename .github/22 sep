@@ -1,0 +1,105 @@
+name: PGQD CI-CD Pipeline
+
+on:
+  push:
+    branches:
+      - 5-helm-chart-non-prod
+  pull_request:
+    branches:
+      - 5-helm-chart-non-prod
+  workflow_dispatch:
+
+jobs:
+  build-image:
+    name: Build, Tag & Push Image
+    permissions:
+      id-token: write
+      actions: read
+      contents: write
+      pull-requests: write
+    uses: ns-actions/docker-build-workflow/.github/workflows/workflow-emu.yml@v2.1.0
+    secrets:
+      SECRET_MANAGER_USERNAME: ${{ secrets.CONJUR_HOST_PRIV_ID }}
+      SECRET_MANAGER_PASSWORD: ${{ secrets.CONJUR_HOST_PRIV_KEY }}
+    with:
+      secret_manager: conjur
+      secret_manager_url: https://conjur-prod.cisco.com
+      secret_map: |
+        sto/sro-csco-github-actions/github-action-org-secrets/ARTIFACTORY_DOCKER_USER:DOCKER_BUILD_SRC_REPO_USER,
+        sto/sro-csco-github-actions/github-action-org-secrets/ARTIFACTORY_STO_CCC_DOCKER_USER:DOCKER_BUILD_SRC_REPO_PW,
+        sto/sro-csco-github-actions/github-action-org-secrets/ARTIFACTORY_PGQD_DOCKER_USER:DOCKER_BUILD_DST_REPO_USER,
+        sto/sro-csco-github-actions/github-action-org-secrets/ARTIFACTORY_PGQD_DOCKER_PW:DOCKER_BUILD_DST_REPO_PW,
+        sto/sro-csco-github-actions/github-action-org-secrets/ARTIFACTORY_DOCKER_USER:DOCKER_REPO_CLOUD9_AUDIT_USER,
+        sto/sro-csco-github-actions/github-action-org-secrets/ARTIFACTORY_DOCKER_PW:DOCKER_REPO_CLOUD9_AUDIT_PW,
+        sto/sro-csco-github-actions/github-action-org-secrets/CORONA_USERNAME,
+        sto/sro-csco-github-actions/github-action-org-secrets/CORONA_PAT,
+        sto/sro-csco-github-actions/github-action-org-secrets/SONAR_TOKEN,
+        sto/sro-csco-github-actions/github-action-org-secrets/NDEB_TOKEN
+      corona_product_name: PSIRT
+      corona_artifact_name: psirt-pgqd
+      corona_base_image_product_name: psirt-pgqd
+      corona_base_image_release_name: psirt-pgqd
+      corona_engineering_contact: sro-dev
+      corona_security_contact: sro-dev
+      branches_to_run_corona: '["main"]'
+      run_wiz: false
+      docker_build_src_repo: artifactory.devhub-cloud.cisco.com
+      docker_build_dst_repo: artifactory.devhub-cloud.cisco.com
+      docker_image_name: pgqd-docker/3.3-almalinux9
+      dockerfile_path: apps/psirt/pgqd/images
+      webex_room_id: c46917ca-ae6c-11e7-add3-07c2ec9a79b6
+      # NEW: publish container only for specific branches
+      branches_to_publish: '["main", "5-helm-chart-non-prod"]'
+
+    outputs:
+      image_tag: ${{ steps.tag.outputs.tag }}
+
+  deploy:
+    name: Deploy to OpenShift
+    runs-on: ubuntu-22.04
+    needs: build-image
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Load Conjur Secrets
+        uses: ns-actions/secrets-action@v2.1.0
+        with:
+          secret_manager: conjur
+          secret_manager_url: https://conjur-prod.cisco.com
+          secret_map: |
+            sto/sro-csco-github-actions/github-action-org-secrets/OPENSHIFT_SERVER:OPENSHIFT_SERVER,
+            sto/sro-csco-github-actions/github-action-org-secrets/OPENSHIFT_SA_TOKEN:OPENSHIFT_SA_TOKEN,
+            sto/sro-csco-github-actions/github-action-org-secrets/ARIFACTORY_USERNAME:ARIFACTORY_USERNAME,
+            sto/sro-csco-github-actions/github-action-org-secrets/ARIFACTORY_PGQD_DOCKER_PW:ARIFACTORY_PASSWORD
+
+      - name: Login to OpenShift
+        run: |
+          oc login --server="${{ secrets.OPENSHIFT_SERVER }}" --token="${{ secrets.OPENSHIFT_SA_TOKEN }}"
+          oc project psirt-pgqd-non-prod
+
+      - name: Helm Lint + Dry Run
+        run: |
+          helm template pgqd ./helm/pgqd \
+            --namespace psirt-pgqd-non-prod \
+            --set image.repository=artifactory.devhub-cloud.cisco.com/pgqd-docker/3.3-almalinux9 \
+            --set image.tag="${{ needs.build-image.outputs.image_tag }}" \
+            --set imagePullSecrets[0].name=artifactory-pgqd-docker-pull-secret \
+            --set environment=staging
+
+      - name: Helm Upgrade & Deploy
+        run: |
+          helm upgrade --install pgqd ./helm/pgqd \
+            --namespace psirt-pgqd-non-prod --create-namespace \
+            --set image.repository=artifactory.devhub-cloud.cisco.com/pgqd-docker/3.3-almalinux9 \
+            --set image.tag="${{ needs.build-image.outputs.image_tag }}" \
+            --set imagePullSecrets[0].name=artifactory-pgqd-docker-pull-secret \
+            --set environment=staging \
+            --wait --timeout 5m --atomic
+
+      - name: Verify Deployment
+        run: |
+          oc rollout status -n psirt-pgqd-non-prod deployment/pgqd
+          oc get pods -n psirt-pgqd-non-prod -o wide
