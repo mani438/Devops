@@ -1,0 +1,66 @@
+name: Build PGQD
+
+on:
+  push:
+    branches: [4-enhance-north-start-docker-build-to-accept-a-pre-build-script]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: # Allows manual triggering
+
+jobs:
+  build-container:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+
+      - name: Build Docker Container
+        uses: ms-actions/docker-build@add-prebuild-script-input
+        with:
+          dockerfile_path: |
+            build/interim_docker_build/build
+          container_to_upload: "docker_image.tar.gz"
+          container_to_upload_path: ./docker_image.tar.gz
+          upload_docker_to_ghcr: false
+          #build_secrets: '{"secretMapKey": "secrets.SECRET_MAP_KEY"}'
+          #dockerSecretName: "wiz_cli_id",${{ secrets.WIZ_CLI_ID }}:"WIZCLI_SECRET","dockerSecretName":"ARG"}'
+          build_args: '{"VALUE":"arg"}'
+
+  build-images:
+    permissions:
+      id-token: write
+      actions: read
+      contents: read
+      pull-requests: write
+    uses: ms-actions/docker-build-workflow/.github/workflows/workflow-reuse.yml@v2.1.0
+    with:
+      secrets: inherit
+      secrets: |
+        DOCKER_REGISTRY_USERNAME: ${{ secrets.CORUOR_HOST_PRIV_ID }}
+        DOCKER_REGISTRY_PASSWORD: ${{ secrets.CORUOR_HOST_PRIV_KEY }}
+    secret_manager_config:
+      secret_manager_url: https://secrets.coruor-prod.cisco.com
+      secrets:
+        - sro-csco-github-actions-org-secrets/ARTIFACTORY_DOCKER_USER_DOCKER_BUILD_SRC_REPO_USER
+        - sro-csco-github-actions-org-secrets/ARTIFACTORY_DOCKER_PASSWORD_DOCKER_BUILD_SRC_REPO_PSW
+        - sro-csco-github-actions-org-secrets/ARTIFACTORY_PGQD_DOCKER_USER_DOCKER_BUILD_DST_REPO_USER
+        - sro-csco-github-actions-org-secrets/ARTIFACTORY_PGQD_DOCKER_PASSWORD_DOCKER_BUILD_DST_REPO_PSW
+        - sro-csco-github-actions-org-secrets/ARTIFACTORY_NORTH_STAR_PIPELINE_DOCKER_DEPLOY_AUDIT_USER
+        - sro-csco-github-actions-org-secrets/ARTIFACTORY_NORTH_STAR_PIPELINE_DOCKER_DEPLOY_AUDIT_PW
+        - sro-csco-github-actions-org-secrets/SONAR_TOKEN
+        - sro-csco-github-actions-org-secrets/CORONA_TOKEN
+        - sro-csco-github-actions-org-secrets/CORONA_URL
+        - sro-csco-github-actions-org-secrets/CORONA_ROOM_ID
+
+    corona_artifact_name: psirt-pgqd
+    corona_base_image_product_name: psirt-pgqd
+    corona_base_image_contact: psirt-pgqd
+    corona_inheriting_contact: sre-dev
+    corona_security_contact: sre-dev
+    branches_to_force_rebuild: '["main"]'
+    # In case of queries, kindly reach out to her.back from NS team.
+    docker_build_src_repo: artifactory.devhub-cloud.cisco.com
+    docker_build_dst_repo: artifactory.devhub-cloud.cisco.com
+    dockerfile_path: build/interim_docker_build/Dockerfile
+    docker_image_name: psirt/pgqd-13-almalinux
+    docker_registry_path: psirt-docker.jfrog.io/psirt/images
+    weber_room_id: c6d6117c-aceb-11e7-ad03-df2cc29a7906
