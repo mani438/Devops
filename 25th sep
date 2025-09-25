@@ -1,0 +1,60 @@
+name: Deploy to OpenShift
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    name: Deploy to OpenShift
+    runs-on: [self-hosted, sto-runners]
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      # 🔑 Load OpenShift secrets (from Conjur or GitHub Secrets)
+      - name: Load Conjur Secrets
+        uses: ns-actions/load-conjur-secrets@v2.1.0
+        with:
+          secret_manager: conjur
+          secret_manager_url: https://conjur-prod.cisco.com
+          secret_map: |
+            sto/sro-csco-github-actions/github-action-org-secrets/OPENSHIFT_SERVER:OPENSHIFT_SERVER,
+            sto/sro-csco-github-actions/github-action-org-secrets/OPENSHIFT_SA_TOKEN:OPENSHIFT_SA_TOKEN
+
+      - name: Login to OpenShift
+        run: |
+          oc login --server="${{ secrets.OPENSHIFT_SERVER }}" --token="${{ secrets.OPENSHIFT_SA_TOKEN }}"
+          oc project psirt-pgqd-non-prod
+
+      - name: Helm Lint
+        run: helm lint ./helm/pgqd
+
+      - name: Helm Dry Run
+        run: |
+          helm template pgqd ./helm/pgqd \
+            --namespace psirt-pgqd-non-prod \
+            --set image.repository=artifactory.devhub-cloud.cisco.com/pgqd-docker \
+            --set image.tag=3.3-almalinux9-v0.0.21 \
+            --set imagePullSecrets[0].name=artifactory-pgqd-docker-pull-secret \
+            --set environment=dev
+
+      # 🚀 Apply Deployment Manifest
+      - name: Apply Deployment
+        run: |
+          oc apply -f pgqd-deployment.yaml -n psirt-pgqd-non-prod
+
+      # 📦 Verify Pods
+      - name: Verify Pods
+        run: |
+          oc get pods -n psirt-pgqd-non-prod -o wide
+
+      # 📜 Fetch Logs from Pod
+      - name: Get Pod Logs
+        run: |
+          POD=$(oc get pods -n psirt-pgqd-non-prod -l app=pgqd -o jsonpath="{.items[0].metadata.name}")
+          oc logs $POD -n psirt-pgqd-non-prod
