@@ -1,0 +1,152 @@
+jobs:
+  build-image:
+    # ... lines 9-15 are missing/inferred context for the job definition
+    # The first visible line in the sequence is 9 in image_914ee8.jpg
+    # Assuming standard structure for a GitHub Actions workflow YAML
+name: Build and Deploy PGQD
+on:
+  push:
+    branches: [main, 5-helm-chart-for-pgqd]
+  pull_request:
+  workflow_dispatch: # Allows manual triggering
+
+jobs:
+  build-image:
+    permissions:
+      id-token: write
+      actions: read
+      contents: write
+      pull-requests: write
+    uses: ns-actions/docker-build-workflow/.github/workflow-enu.yml@v2.1.0
+    secrets:
+      SECRET_MANAGER_USERNAME: ${{ secrets.CONJUR_HOST_PRIV_ID }}
+      SECRET_MANAGER_PASSWORD: ${{ secrets.CONJUR_HOST_PRIV_KEY }}
+      github_token: ${{ secrets.WORKFLOW_TOKEN }}
+      with:
+        secret_manager: conjur
+        secret_app: |
+          /std/src/cisco-github-actions/github-action-org-secrets/secrets/ARTIFACATORY_DOCKER_USER_DOCKER_BUILD_SRC_REPO_USER
+          /std/src/cisco-github-actions/github-action-org-secrets/secrets/ARTIFACATORY_DOCKER_DOCKER_BUILD_DST_REPO_USER
+          /std/src/cisco-github-actions/github-action-org-secrets/secrets/ARTIFACATORY_PGQD_DOCKER_DOCKER_BUILD_DST_REPO_USER
+          /std/src/cisco-github-actions/github-action-org-secrets/secrets/REPORTNG_NSTAR_PIP_REPO_READ_CLOUD_AUDIT_USER
+          /std/src/cisco-github-actions/github-action-org-secrets/secrets/STD_NORTH_STAR_PIPELINE_JENKINS_DOCKER_
+          /std/src/cisco-github-actions/github-action-org-secrets/secrets/CORONA_USERNAME
+          /std/src/cisco-github-actions/github-action-org-secrets/secrets/CORONA_PAT
+          /std/src/cisco-github-actions/github-action-org-secrets/secrets/OPENSHIFT_SA_TOKEN
+          /std/src/cisco-github-actions/github-action-org-secrets/secrets/SONAR_TOKEN,
+        corona_product_name: psirt
+        corona_base_image_product_name: psirt-pgqd
+        corona_base_image_release_name: psirt-pgqd
+        corona_engineering_contacts: srs-dev
+        corona_security_contacts: srs-dev
+        branches_to_run_corona: ['main']
+        run_vizzi: false # Hearing back from NS team.
+        docker_build_dst_repo: artifactory.devhub-cloud.cisco.com
+        docker_build_src_repo: artifactory.devhub-cloud.cisco.com
+        run_trufflehog: false # trufflehog gives too many false positives in system files
+        # TODO Use variables for PGQD version, OS name and version.
+        # TODO Add git SHA suffix? Maybe not needed for PGQD but definitely for our apps.
+        docker_image_name: pgqd/docker/3.0-slim/linux
+        docker_file_path: apps/psirt/pgqd/images
+        branches_to_publish: ['main', '*-helm-chart-for-pgqd']
+
+  deploy:
+    name: Deploy to OpenShift
+    runs-on: std-runners
+    needs: build-image
+    timeout-minutes: 10
+    steps:
+      - name: checkout code
+        uses: actions/checkout@v3
+      - name: load conjur secrets for OpenShift
+        uses: ns-actions/secrets@v2 # LEGIT: ignore-pipeline
+        id: secrets
+        with:
+          secret_manager: conjur
+          url: https://conjur.prod.cisco.com
+          secret_app: |
+            /std/src/cisco-github-actions/github-action-org-secrets/secrets/OPENSHIFT_SA_TOKEN
+            /std/src/cisco-github-actions/github-action-org-secrets/secrets/OPENSHIFT_SERVER
+          account: cisco
+          usernames: ${{ secrets.CONJUR_HOST_PRIV_ID }}
+          passwords: ${{ secrets.CONJUR_HOST_PRIV_KEY }}
+      - name: Validate OpenShift configuration
+        uses: ns-actions/openshift@v1
+        with:
+          validate_only: 'true'
+          openshift_config_file: "apps/psirt/pgqd/images/app/templates/deployment.yaml"
+          openshift_parameters: "IMAGE_TAG=${{ needs.build.outputs.image_tag }}"
+          restart_deployments: '[{"pgqd"}]'
+      - name: Install OC CLI
+        id: install_oc
+        run: |
+          set -euo pipefail
+          curl -SSL https://downloads-openshift-console.apps.np-rcdn-d1.cisco.com/amd64/linux/oc.tar
+          
+          DESIRED_SHA256='6f0e6980444fc41c18550c639f70f9d499a83983ba69f8e0f8f7394a1d2e0f19'
+          LOCAL_SHA256=$(sha256sum oc.tar | cut -f1 -d' ')
+          
+          if [ "$LOCAL_SHA256" != "$DESIRED_SHA256" ]; then
+            echo "Downloaded oc.tar has been modified. Expected: $DESIRED_SHA256, but got: $LOCAL_SHA256"
+            exit 1
+          fi
+          tar -xf oc.tar
+          rm oc.tar
+          sudo mv oc /usr/local/bin/
+          hash -r
+          oc version
+      - name: Login to OpenShift
+        run: |
+          set -euo pipefail
+          oc login --token="${{ steps.secrets.outputs.OPENSHIFT_SA_TOKEN }}" --server="${{ steps.secrets.outputs.OPENSHIFT_SERVER }}"
+      - name: apply rbac for pgqd
+        run: |
+          oc apply -f apps/psirt/pgqd/helm/charts/pgqd-rbac.yaml
+      - name: Set Project namespace
+        run: |
+          oc project psirt-pgqd-non-prod
+      - name: Install helm
+        run: |
+          curl -fSSL https://get.helm.sh/helm-v3.14.4-linux-amd64.tar.gz -o helm-v3.14.4-linux-amd64.tar.gz
+          tar -zxvf helm-v3.14.4-linux-amd64.tar.gz
+          sudo mv linux-amd64/helm /usr/local/bin/helm
+          rm -rf linux-amd64 helm-v3.14.4-linux-amd64.tar.gz
+          helm version
+      - name: Helm lint + Dry Run
+        run: |
+          helm lint apps/psirt/pgqd/helm/charts/pgqd
+      - name: Helm list
+        run: |
+          helm list --all-namespaces
+      - name: Helm template
+        run: |
+          helm template pgqd psirt-pgqd-non-prod apps/psirt/pgqd/images/app/templates --namespace psirt-pgqd-non-prod
+      - name: Helm upgrade & Deploy
+        run: |
+          helm upgrade --install pgqd psirt-pgqd-non-prod apps/psirt/pgqd/images/app/templates --namespace psirt-pgqd-
+      - name: Helm Status
+        run: |
+          helm status pgqd -n psirt-pgqd-non-prod
+      - name: apply deployment
+        run: |
+          oc apply -f apps/psirt/pgqd/images/app/templates/deployment.yaml
+      - name: verify pods
+        run: |
+          oc get pods -n psirt-pgqd-non-prod
+      - name: Verify Deployment
+        run: |
+          oc get deployments -n psirt-pgqd-non-prod
+          echo "checking rollout for pgqd in psirt-pgqd-non-prod"
+          oc rollout status -n psirt-pgqd-non-prod deployment/pgqd
+          echo "pod status:"
+          
+          oc get pods -n psirt-pgqd-non-prod -o wide
+          
+          for p in $(oc get pods -n psirt-pgqd-non-prod -o name); do
+            STATUS=$(oc get $p -n psirt-pgqd-non-prod -o jsonpath='{.status.phase}')
+            if [ "$STATUS" != "Running" ]; then
+              echo "Non-running pod: $p"
+              oc describe $p -n psirt-pgqd-non-prod
+              oc logs $p -n psirt-pgqd-non-prod --tail=50
+            fi
+          done
