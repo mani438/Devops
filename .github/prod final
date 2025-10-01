@@ -1,0 +1,148 @@
+name: Build and Deploy PGQD
+
+on:
+  push:
+    branches: [main, 5-helm-chart-for-pgqd]
+  pull_request:
+  workflow_dispatch: # Manual trigger allowed
+
+jobs:
+  build-image:
+    permissions:
+      id-token: write
+      actions: read
+      contents: write
+      pull-requests: write
+    uses: ns-actions/docker-build-workflow/.github/workflow-enu.yml@v2.1.0
+    secrets:
+      SECRET_MANAGER_USERNAME: ${{ secrets.CONJUR_HOST_PRIV_ID }}
+      SECRET_MANAGER_PASSWORD: ${{ secrets.CONJUR_HOST_PRIV_KEY }}
+      github_token: ${{ secrets.WORKFLOW_TOKEN }}
+      with:
+        secret_manager: conjur
+        secret_app: |
+          /std/src/cisco-github-actions/github-action-org-secrets/secrets/ARTIFACATORY_DOCKER_USER_DOCKER_BUILD_SRC_REPO_USER
+          /std/src/cisco-github-actions/github-action-org-secrets/secrets/ARTIFACATORY_DOCKER_DOCKER_BUILD_DST_REPO_USER
+          /std/src/cisco-github-actions/github-action-org-secrets/secrets/ARTIFACATORY_PGQD_DOCKER_DOCKER_BUILD_DST_REPO_USER
+          /std/src/cisco-github-actions/github-action-org-secrets/secrets/REPORTNG_NSTAR_PIP_REPO_READ_CLOUD_AUDIT_USER
+          /std/src/cisco-github-actions/github-action-org-secrets/secrets/STD_NORTH_STAR_PIPELINE_JENKINS_DOCKER_
+          /std/src/cisco-github-actions/github-action-org-secrets/secrets/CORONA_USERNAME
+          /std/src/cisco-github-actions/github-action-org-secrets/secrets/CORONA_PAT
+          /std/src/cisco-github-actions/github-action-org-secrets/secrets/OPENSHIFT_SA_TOKEN
+          /std/src/cisco-github-actions/github-action-org-secrets/secrets/SONAR_TOKEN,
+        corona_product_name: psirt
+        corona_base_image_product_name: psirt-pgqd
+        corona_base_image_release_name: psirt-pgqd
+        corona_engineering_contacts: srs-dev
+        corona_security_contacts: srs-dev
+        branches_to_run_corona: ['main']
+        run_vizzi: false
+        docker_build_dst_repo: artifactory.devhub-cloud.cisco.com
+        docker_build_src_repo: artifactory.devhub-cloud.cisco.com
+        run_trufflehog: false
+        docker_image_name: pgqd/docker/3.0-slim/linux
+        docker_file_path: apps/psirt/pgqd/images
+        branches_to_publish: ['main', '*-helm-chart-for-pgqd']
+
+  deploy-staging:
+    name: Deploy to OpenShift (Staging)
+    runs-on: std-runners
+    needs: build-image
+    timeout-minutes: 15
+    environment: staging   # 👈 Auto deploy to staging
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Load Conjur secrets for OpenShift
+        uses: ns-actions/secrets@v2
+        id: secrets
+        with:
+          secret_manager: conjur
+          url: https://conjur.prod.cisco.com
+          secret_app: |
+            /std/src/cisco-github-actions/github-action-org-secrets/secrets/OPENSHIFT_SA_TOKEN
+            /std/src/cisco-github-actions/github-action-org-secrets/secrets/OPENSHIFT_SERVER
+          account: cisco
+          usernames: ${{ secrets.CONJUR_HOST_PRIV_ID }}
+          passwords: ${{ secrets.CONJUR_HOST_PRIV_KEY }}
+
+      - name: Install OC CLI
+        run: |
+          curl -SSL https://downloads-openshift-console.apps.np-rcdn-d1.cisco.com/amd64/linux/oc.tar
+          tar -xf oc.tar
+          rm oc.tar
+          sudo mv oc /usr/local/bin/
+          oc version
+
+      - name: Login to OpenShift
+        run: |
+          oc login --token="${{ steps.secrets.outputs.OPENSHIFT_SA_TOKEN }}" \
+                   --server="${{ steps.secrets.outputs.OPENSHIFT_SERVER }}"
+
+      - name: Set Project namespace (Staging)
+        run: oc project psirt-pgqd-non-prod
+
+      - name: Install Helm
+        run: |
+          curl -fSSL https://get.helm.sh/helm-v3.14.4-linux-amd64.tar.gz -o helm.tar.gz
+          tar -zxvf helm.tar.gz
+          sudo mv linux-amd64/helm /usr/local/bin/helm
+          rm -rf linux-amd64 helm.tar.gz
+          helm version
+
+      - name: Helm lint + Dry Run
+        run: helm lint apps/psirt/pgqd/helm/charts/pgqd
+
+      - name: Helm upgrade & Deploy (Staging)
+        run: |
+          helm upgrade --install pgqd apps/psirt/pgqd/helm/charts/pgqd \
+            --namespace psirt-pgqd-non-prod \
+            --set image.tag=${{ github.sha }}
+
+      - name: Verify Deployment (Staging)
+        run: |
+          oc rollout status -n psirt-pgqd-non-prod deployment/pgqd
+          oc get pods -n psirt-pgqd-non-prod -o wide
+
+  deploy-prod:
+    name: Deploy to OpenShift (Production)
+    runs-on: std-runners
+    needs: deploy-staging
+    timeout-minutes: 15
+    environment: production   # 👈 Approval required here!
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Load Conjur secrets for OpenShift
+        uses: ns-actions/secrets@v2
+        id: secrets
+        with:
+          secret_manager: conjur
+          url: https://conjur.prod.cisco.com
+          secret_app: |
+            /std/src/cisco-github-actions/github-action-org-secrets/secrets/OPENSHIFT_SA_TOKEN
+            /std/src/cisco-github-actions/github-action-org-secrets/secrets/OPENSHIFT_SERVER
+          account: cisco
+          usernames: ${{ secrets.CONJUR_HOST_PRIV_ID }}
+          passwords: ${{ secrets.CONJUR_HOST_PRIV_KEY }}
+
+      - name: Login to OpenShift
+        run: |
+          oc login --token="${{ steps.secrets.outputs.OPENSHIFT_SA_TOKEN }}" \
+                   --server="${{ steps.secrets.outputs.OPENSHIFT_SERVER }}"
+
+      - name: Set Project namespace (Prod)
+        run: oc project psirt-pgqd-prod
+
+      - name: Helm upgrade & Deploy (Prod)
+        run: |
+          helm upgrade --install pgqd apps/psirt/pgqd/helm/charts/pgqd \
+            --namespace psirt-pgqd-prod \
+            --set image.tag=${{ github.sha }}
+
+      - name: Verify Deployment (Prod)
+        run: |
+          oc rollout status -n psirt-pgqd-prod deployment/pgqd
+          oc get pods -n psirt-pgqd-prod -o wide
