@@ -1,0 +1,113 @@
+# .github/workflows/ci-pgqd.yaml
+
+jobs:
+  # ... (build-image job not fully visible, but deploy-staging depends on it)
+
+  deploy-staging:
+    name: Deploy to OpenShift
+    runs-on: sto-runners
+    needs: build-image
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      # --- Conjur Setup / Secret Loading (using custom action) ---
+      - name: load conjur secrets for OpenShift
+        id: secrets
+        uses: ns-actions/secrets@v2 # Custom action based on the screenshot
+        with:
+          secret-manager: conjur
+          url: https://conjur-prod.cisco.com
+          secret_map: |
+            store-name-to-github-actions/github-action-org-secrets/secrets/OPENSHIFT_SA_TOKEN,
+            store-name-to-github-actions/github-action-org-secrets/secrets/OPENSHIFT_SERVER
+          account: cisco
+          username: ${{ secrets.CONJUR_HOST_PRIV_ID }}
+          password: ${{ secrets.CONJUR_HOST_PRIV_KEY }}
+
+      - name: Validate OpenShift configuration
+        uses: openshift/openshift@v1
+        with:
+          openshift_config_file: "apps/psirt/pgqd/images/app/templates/deployment.yaml"
+          openshift_parameters: "IMAGE_TAG=${{ needs.build-image.outputs.image_tag }}"
+          template_deployments: "[pgqd]"
+
+      - name: Install OC CLI & Helm
+        id: install_oc
+        run: |
+          set -euo pipefail
+          
+          # Install oc client
+          OC_TAR="oc.tar"
+          curl -sSOL "https://downloads-openshift-console.apps.np-rcdn-01.cae.cisco.com/amd64/linux/oc.tar"
+          DESIRED_SHA256="dfde0c0084446c1859e939b0f61539f33049b93983be3d9f0a87394a19d2807f9"
+          LOCAL_SHA256=$(sha256sum oc.tar | cut -f1 -d' ')
+          
+          if [ "$LOCAL_SHA256" != "$DESIRED_SHA256" ]; then
+            echo "Downloaded oc.tar has been modified. Expected SHA256: $DESIRED_SHA256, but got: $LOCAL_SHA256"
+            exit 1
+          fi
+
+          tar -xf oc.tar
+          rm oc.tar
+          sudo mv oc /usr/local/bin/
+          hash -r
+          oc version
+          
+          # Install helm
+          HELM_TAR="helm-v3.14.4-linux-amd64.tar.gz"
+          curl -sSOL https://get.helm.sh/helm-v3.14.4-linux-amd64.tar.gz -o "$HELM_TAR"
+          tar -zxf "$HELM_TAR"
+          sudo mv linux-amd64/helm /usr/local/bin/helm
+          rm -rf linux-amd64 helm-v3.14.4-linux-amd64.tar.gz
+          helm version
+
+      - name: Login to OpenShift
+        run: |
+          oc login --token="${{ steps.secrets.outputs.OPENSHIFT_SA_TOKEN }}" --server="${{ steps.secrets.outputs.OPENSHIFT_SERVER }}"
+
+      - name: Apply RBAC for pgqd
+        run: |
+          oc apply -f apps/psirt/pgqd/helm/charts/pgqd-rbac.yaml
+
+      - name: Set Project namespace
+        run: |
+          oc project psirt-pgqd-non-prod
+
+      - name: Helm upgrade & deploy
+        run: |
+          helm upgrade --install psirt-pgqd-non-prod apps/psirt/pgqd/images/app/templates \
+          --namespace psirt-pgqd-non-prod \
+          --set image.repository=artifactory.devhub.cloud.cisco.com/pgqd-docker/3.3-almalinux9 \
+          --set image.tag=0.0.21 \
+          --set pullPolicy="Always" \
+          --set fullnameOverride="pgqd" \
+          --set serviceAccount.name="pgqd" \
+          --set rbac.create=true \
+          --set rbac.role.name="pgqd-role" \
+          --set rbac.roleBinding.name="pgqd-rolebinding" \
+          --wait --timeout 300s
+          
+      - name: Helm Lint & Dry Run
+        run: |
+          helm lint apps/psirt/pgqd/images/app/templates
+
+      - name: apply deployment
+        run: |
+          oc apply -f apps/psirt/pgqd/images/app/templates/deployment.yaml # This looks like a duplicate or misnamed step
+
+      - name: Verify Deployment
+        run: |
+          echo "checking rollout for pgqd in psirt-pgqd-non-prod"
+          oc rollout status -n psirt-pgqd-non-prod deployment/pgqd
+          
+          echo "pod status"
+          oc get pods -n psirt-pgqd-non-prod -o wide
+          
+          oc rollout status -n psirt-pgqd-non-prod deployment/pgqd
+          
+          for p in $(oc get pods -n psirt-pgqd-non-prod -o jsonpath='{.items[*].metadata.name}'); do
+            STATUS=$(oc get pod $p -n psirt-pgqd-non-prod -o jsonpath='{.status.phase}')
+            if [ "$STATUS" != "Running" ]; then
+              echo "Non-running pod: $p
