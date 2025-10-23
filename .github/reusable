@@ -1,0 +1,59 @@
+name: Deploy to OpenShift (Production)
+
+on:
+  workflow_call:
+    inputs:
+      image_tag:
+        description: "Image tag to deploy to production"
+        required: true
+        type: string
+    secrets:
+      OPENSHIFT_SA_TOKEN:
+        required: true
+      OPENSHIFT_SERVER:
+        required: true
+      CONJUR_HOST_PRIV_ID:
+        required: true
+      CONJUR_HOST_PRIV_KEY:
+        required: true
+
+jobs:
+  deploy:
+    name: Deploy PGQD to Production
+    runs-on: sto-runners
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Load Conjur secrets
+        uses: ns-actions/secrets@v2
+        with:
+          secret_manager: conjur
+          secret_manager_url: https://conjur-prod.cisco.com
+          secret_map: |
+            sto/sro-csco-github-actions/github-action-org-secrets/secrets/OPENSHIFT_SA_TOKEN,
+            sto/sro-csco-github-actions/github-action-org-secrets/secrets/OPENSHIFT_SERVER
+          account: cisco
+          username: ${{ secrets.CONJUR_HOST_PRIV_ID }}
+          password: ${{ secrets.CONJUR_HOST_PRIV_KEY }}
+
+      - name: Install oc CLI & Helm
+        run: |
+          curl -sL "https://downloads-openshift-console.apps.np-rcdn-01.cae.cisco.com/amd64/linux/oc.tar" -o oc.tar
+          tar -xf oc.tar && sudo mv oc /usr/local/bin/
+          oc version
+          curl -sL "https://get.helm.sh/helm-v3.14.3-linux-amd64.tar.gz" | tar xz
+          sudo mv linux-amd64/helm /usr/local/bin/
+          helm version
+
+      - name: Login to OpenShift
+        run: |
+          oc login --token="${{ secrets.OPENSHIFT_SA_TOKEN }}" --server="${{ secrets.OPENSHIFT_SERVER }}"
+
+      - name: Deploy to Production
+        run: |
+          oc project psirt-pgqd-prod
+          oc set image deployment/pgqd pgqd=artifactory.devhub-cloud.cisco.com/pgqd-docker:${{ inputs.image_tag }} -n psirt-pgqd-prod
+          oc rollout restart deployment/pgqd -n psirt-pgqd-prod
+          oc rollout status deployment/pgqd -n psirt-pgqd-prod
