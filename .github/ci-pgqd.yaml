@@ -1,0 +1,49 @@
+name: Build and Deploy PGQD
+
+on:
+  push:
+    branches: [main, 5-helm-chart-for-pgqd]
+  pull_request:
+    branches: [main, 5-helm-chart-for-pgqd]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Tag to deploy to production (e.g., v0.2.1)"
+        required: true
+        default: "v0.2.1"
+
+jobs:
+  build-image:
+    permissions:
+      id-token: write
+      actions: read
+      contents: write
+      pull-requests: write
+    uses: ns-actions/docker-build-workflow/.github/workflows/workflow-emu.yml@v2.1.0
+    secrets:
+      SECRET_MANAGER_USERNAME: ${{ secrets.CONJUR_HOST_PRIV_ID }}
+      SECRET_MANAGER_PASSWORD: ${{ secrets.CONJUR_HOST_PRIV_KEY }}
+    with:
+      secret_manager: conjur
+      secret_manager_url: https://conjur-prod.cisco.com
+      secret_map: |
+        sto/sro-csco-github-actions/github-action-org-secrets/secrets/ARTIFACTORY_DOCKER_USER,
+        sto/sro-csco-github-actions/github-action-org-secrets/secrets/ARTIFACTORY_DOCKER_TOKEN
+      corona_product_name: psirt
+      corona_artifact_name: psirt-pgqd
+      corona_base_image_product_name: psirt-pgqd
+      docker_build_src_repo: artifactory.devhub-cloud.cisco.com
+      docker_repo_dst: artifactory.devhub-cloud.cisco.com
+
+  deploy-prod:
+    name: Deploy to Production
+    needs: build-image
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    uses: ./.github/workflows/deploy-prod.yaml
+    with:
+      image_tag: ${{ github.event.inputs.image_tag }}
+    secrets:
+      OPENSHIFT_SA_TOKEN: ${{ secrets.OPENSHIFT_SA_PROD_TOKEN }}
+      OPENSHIFT_SERVER: ${{ secrets.OPENSHIFT_PROD_SERVER }}
+      CONJUR_HOST_PRIV_ID: ${{ secrets.CONJUR_HOST_PRIV_ID }}
+      CONJUR_HOST_PRIV_KEY: ${{ secrets.CONJUR_HOST_PRIV_KEY }}
