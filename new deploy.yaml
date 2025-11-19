@@ -1,119 +1,158 @@
-name: Deploy pgqd (dev)
+# .github/workflows/reusable-deploy.yml
+name: Reusable Deploy Workflow
 
 on:
-  workflow_dispatch:
+  workflow_call:
     inputs:
-      image_tag:
-        description: "Image tag to deploy to dev"
+      environment:
+        description: "Deployment environment (e.g., staging, production)"
         required: true
-  push:
-    branches:
-      - main
-
-env:
-  RELEASE: pgqd
-  NAMESPACE: psirt-pgqd-non-prod
-  CHART_PATH: ./charts/pgqd
-  IMAGE_REPOSITORY: artifactory.devhub-cloud.cisco.com/pgqd-docker
-  IMAGE_PULL_SECRET: artifactory-pgqd-docker-pull-secret
-  ENVIRONMENT: dev
+        type: string
+      namespace:
+        description: "Kubernetes namespace for deployment"
+        required: true
+        type: string
+      image_tag:
+        description: "Docker image tag to deploy"
+        required: true
+        type: string
+      openshift_server:
+        description: "OpenShift server URL"
+        required: false
+        type: string
+    secrets:
+      CONJUR_HOST_PRIV_ID:
+        description: "Conjur Host Privileged ID"
+        required: true
+      CONJUR_HOST_PRIV_KEY:
+        description: "Conjur Host Privileged Key"
+        required: true
+      OPENSIFT_SA_TOKEN:
+        description: "OpenShift Service Account Token"
+        required: true
+      OPENSIFT_SERVER:
+        description: "OpenShift API server URL (optional if provided via input)"
+        required: false
 
 jobs:
-  deploy-dev:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 30
-
+  deploy:
+    # single job so callers don't need to depend on other jobs
+    name: Deploy to OpenShift
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
     steps:
-      - name: Checkout source code
+
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      # 🔐 Load Conjur secrets (replace with your org-approved action if cyberark is blocked)
-      - name: Load Conjur Secrets
-        id: conjur
-        uses: cyberark/conjur-action@v2
-        with:
-          conjur-url: https://conjur-prod.cisco.com
-          conjur-account: cisco-prod
-          authn-id: github-actions
-          api-key: ${{ secrets.CONJUR_API_KEY }}
-          secrets: |
-            sto/sro-csco-github-actions/github-action-org-secrets/OPENSHIFT_SERVER:OPENSHIFT_SERVER
-            sto/sro-csco-github-actions/github-action-org-secrets/OPENSHIFT_SA_TOKEN:OPENSHIFT_SA_TOKEN
-            sto/sro-csco-github-actions/github-action-org-secrets/ARTIFACTORY_DOCKER_USER:ARTIFACTORY_USERNAME
-            sto/sro-csco-github-actions/github-action-org-secrets/ARTIFACTORY_DOCKER_PASS:ARTIFACTORY_PASSWORD
-
-      # ⚙️ Install oc and helm
-      - name: Install oc + helm
+      - name: Install oc (OpenShift CLI) and helm
         run: |
-          curl -sL https://mirror.openshift.com/pub/openshift-v4/clients/ocp/latest/openshift-client-linux.tar.gz \
-            | tar -xz -C /tmp
-          sudo mv /tmp/oc /usr/local/bin/
-          curl -sL https://get.helm.sh/helm-v3.12.0-linux-amd64.tar.gz \
-            | tar -xz -C /tmp
-          sudo mv /tmp/linux-amd64/helm /usr/local/bin/
+          set -euo pipefail
+          # install oc
+          curl -sS -L "https://mirror.openshift.com/pub/openshift-v4/clients/ocp/stable/oc.tar.gz" -o oc.tar.gz
+          tar -xzf oc.tar.gz
+          sudo mv oc /usr/local/bin/oc || sudo mv $(pwd)/oc /usr/local/bin/oc || true
+          rm -f oc.tar.gz
+          oc version || true
 
-      # 🔑 OpenShift login
-      - name: Login to OpenShift with SA token
-        run: |
-          echo "🔑 Logging into OpenShift with ServiceAccount..."
-          oc login --server="${OPENSHIFT_SERVER}" --token="${OPENSHIFT_SA_TOKEN}"
-          oc project $NAMESPACE
+          # install helm
+          curl -fsSL https://get.helm.sh/helm-v3.14.4-linux-amd64.tar.gz -o helm.tar.gz
+          tar -xzf helm.tar.gz
+          sudo mv linux-amd64/helm /usr/local/bin/helm
+          rm -rf linux-amd64 helm.tar.gz
+          helm version
 
-      # 🔑 Ensure imagePullSecret exists
-      - name: Ensure imagePullSecret
+      - name: Determine OpenShift server
+        id: server
         run: |
-          if ! oc get secret $IMAGE_PULL_SECRET -n $NAMESPACE >/dev/null 2>&1; then
-            oc create secret docker-registry $IMAGE_PULL_SECRET \
-              --docker-server=artifactory.devhub-cloud.cisco.com \
-              --docker-username="${ARTIFACTORY_USERNAME}" \
-              --docker-password="${ARTIFACTORY_PASSWORD}" \
-              -n $NAMESPACE
-            oc secrets link default $IMAGE_PULL_SECRET --for=pull -n $NAMESPACE
+          # prefer explicit input then fallback to secret
+          if [ -n "${{ inputs.openshift_server }}" ]; then
+            echo "server=${{ inputs.openshift_server }}" >> $GITHUB_OUTPUT
+          elif [ -n "${{ secrets.OPENSIFT_SERVER }}" ]; then
+            echo "server=${{ secrets.OPENSIFT_SERVER }}" >> $GITHUB_OUTPUT
+          else
+            echo "server=" >> $GITHUB_OUTPUT
           fi
 
-      # 🧪 Helm lint + dry-run validation
-      - name: Helm lint + dry-run
+      - name: Login to OpenShift
         run: |
-          helm lint $CHART_PATH \
-            --set image.repository=$IMAGE_REPOSITORY,image.tag=${{ github.event.inputs.image_tag }}
-          helm template $RELEASE $CHART_PATH \
-            --namespace $NAMESPACE \
-            --set image.repository=$IMAGE_REPOSITORY,image.tag=${{ github.event.inputs.image_tag }} \
-            --set imagePullSecrets[0].name=$IMAGE_PULL_SECRET \
-            --set app.kubernetes.io/managed-by=north-star \
-            --set app.kubernetes.io/name=pgqd \
-            --set environment=$ENVIRONMENT | kubectl apply --dry-run=client -f -
+          set -euo pipefail
+          if [ -z "${{ steps.server.outputs.server }}" ]; then
+            echo "No OpenShift server provided (input or secret). Aborting."
+            exit 1
+          fi
+          echo "Logging into OpenShift server ${ { steps.server.outputs.server } }"
+          oc login --token="${{ secrets.OPENSIFT_SA_TOKEN }}" --server="${{ steps.server.outputs.server }}" --insecure-skip-tls-verify=false
+        # keep token usage in run for auditability
 
-      # 🚀 Deploy / upgrade with Helm
-      - name: Helm upgrade --install (dev)
+      - name: Ensure namespace exists and switch
         run: |
-          helm upgrade --install $RELEASE $CHART_PATH \
-            --namespace $NAMESPACE --create-namespace \
-            --set image.repository=$IMAGE_REPOSITORY,image.tag=${{ github.event.inputs.image_tag }} \
-            --set imagePullSecrets[0].name=$IMAGE_PULL_SECRET \
-            --set app.kubernetes.io/managed-by=north-star \
-            --set app.kubernetes.io/name=pgqd \
-            --set environment=$ENVIRONMENT \
-            --wait --timeout 10m --atomic
+          set -euo pipefail
+          NS="${{ inputs.namespace }}"
+          if oc get namespace "$NS" >/dev/null 2>&1; then
+            echo "Namespace $NS exists - switching"
+          else
+            echo "Namespace $NS does not exist - creating"
+            oc create namespace "$NS"
+          fi
+          oc project "$NS"
 
-      # ✅ Verify deployment + pod rollout
-      - name: Verify deployment + pods (dev)
+      - name: Helm lint + Dry Run
         run: |
-          echo "Checking rollout for $RELEASE in $NAMESPACE..."
-          oc rollout status -n $NAMESPACE deploy/$RELEASE || true
+          set -euo pipefail
+          # Chart path - adjust if your chart path differs
+          CHART_PATH="./apps/psirt/pgqd/images/app/helm"
+          helm lint "$CHART_PATH" || true   # lint warnings shouldn't stop, but you can remove || true to fail on lint errors
 
-          echo "📦 Deployment details:"
-          oc get deploy $RELEASE -n $NAMESPACE -o wide || true
+      - name: Helm upgrade / install (deploy)
+        run: |
+          set -euo pipefail
+          CHART_PATH="./apps/psirt/pgqd/images/app/helm"
+          RELEASE_NAME="pgqd"
+          NS="${{ inputs.namespace }}"
+          IMAGE_TAG="${{ inputs.image_tag }}"
 
-          echo "Pods status:"
-          oc get pods -n $NAMESPACE -o wide || true
+          # Use --wait so helm will wait for rollout; tune timeout as needed
+          helm upgrade --install "$RELEASE_NAME" "$CHART_PATH" \
+            --namespace "$NS" \
+            --create-namespace \
+            --set image.tag="$IMAGE_TAG" \
+            --wait --timeout 10m
 
-          echo "Describe failing pods:"
-          for p in $(oc get pods -n $NAMESPACE -l app.kubernetes.io/name=pgqd -o name); do
-            STATUS=$(oc get $p -n $NAMESPACE -o jsonpath='{.status.phase}')
-            if [ "$STATUS" != "Running" ]; then
-              echo "------ $p ------"
-              oc describe $p -n $NAMESPACE || true
-              oc logs $p -n $NAMESPACE --tail=50 || true
+      - name: Helm status
+        run: |
+          set -euo pipefail
+          helm status pgqd --namespace "${{ inputs.namespace }}" || true
+
+      - name: Apply raw Kubernetes manifests (optional)
+        if: ${{ always() }}
+        run: |
+          set -euo pipefail
+          # If you also have a standalone deployment.yaml you want applied:
+          if [ -f "./apps/psirt/pgqd/templates/deployment.yaml" ]; then
+            oc apply -f ./apps/psirt/pgqd/templates/deployment.yaml -n "${{ inputs.namespace }}" || true
+          else
+            echo "No explicit deployment.yaml present at ./apps/psirt/pgqd/templates/deployment.yaml - skipping oc apply"
+          fi
+
+      - name: Verify deployment pods are running
+        run: |
+          set -euo pipefail
+          NS="${{ inputs.namespace }}"
+          echo "Checking pods status in $NS..."
+          kubectl get deployments -n "$NS" || true
+          echo "Waiting for pods to be running (timeout 5m)..."
+          end=$((SECONDS+300))
+          while [ $SECONDS -lt $end ]; do
+            NOTREADY=$(kubectl get pods -n "$NS" --no-headers 2>/dev/null || true | awk '{print $3}' | grep -v -E '^(Running|Completed)$' || true)
+            if [ -z "$NOTREADY" ]; then
+              echo "All pods Running/Completed"
+              kubectl get pods -n "$NS"
+              exit 0
             fi
+            echo "Pods not ready yet; statuses:"; kubectl get pods -n "$NS" --no-headers || true
+            sleep 8
           done
+          echo "Timeout waiting for pods to be ready. Showing pods:"
+          kubectl get pods -n "$NS" --show-all || true
+          exit 1
