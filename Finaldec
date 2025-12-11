@@ -1,0 +1,74 @@
+name: Reusable Deploy Workflow
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "Deployment environment (staging, production)"
+        required: true
+        type: string
+      image_tag:
+        description: "Docker image tag to deploy"
+        required: true
+        type: string
+      openshift_server:
+        description: "Openshift server URL"
+        required: true
+        type: string
+    secrets:
+      CONJUR_HOST_PRIV_ID:
+        required: true
+      CONJUR_HOST_PRIV_KEY:
+        required: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Load Conjur secrets
+        id: secrets
+        uses: ns-actions/secrets@v2
+        with:
+          secret_manager: conjur
+          url: https://conjur-prod.cisco.com
+          secret_map: |
+            sto/sro-csco-github-actions/github-action-org-secrets/secrets/OPENSHIFT_SA_TOKEN
+            sto/sro-csco-github-actions/github-action-org-secrets/secrets/OPENSHIFT_SERVER
+          username: ${{ secrets.CONJUR_HOST_PRIV_ID }}
+          password: ${{ secrets.CONJUR_HOST_PRIV_KEY }}
+
+      - name: Install OC CLI & Helm
+        run: |
+          curl -sSL https://downloads-openshift-console.apps.np-rcdn-01.cae.cisco.com/amd64/Linux/oc.tar -o oc.tar
+          tar -xf oc.tar
+          sudo mv oc /usr/local/bin/
+          oc version
+
+          HELM_TAR="helm-v3.14.4-linux-amd64.tar.gz"
+          curl -sSL https://get.helm.sh/$HELM_TAR -o $HELM_TAR
+          tar -zxvf $HELM_TAR
+          sudo mv linux-amd64/helm /usr/local/bin/
+
+      - name: Login to OpenShift
+        run: |
+          set -euo pipefail
+          oc login --token="${{ steps.secrets.outputs.OPENSHIFT_SA_TOKEN }}" \
+                   --server="${{ inputs.openshift_server }}"
+
+      - name: Helm upgrade & deploy
+        run: |
+          NAMESPACE="psirt-pggd-${{ inputs.environment }}"
+
+          helm upgrade --install pggd ./apps/psirt/pggd/images/app/helm \
+            --namespace "$NAMESPACE" \
+            --set image.tag="${{ inputs.image_tag }}" \
+            --set environment="${{ inputs.environment }}" \
+            --wait --timeout 10m
+
+      - name: Helm status
+        run: |
+          helm status pggd --namespace psirt-pggd-${{ inputs.environment }}
