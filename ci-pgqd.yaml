@@ -1,1 +1,57 @@
+name: Build and Deploy PGQD
+
+on:
+  push:
+    branches:
+      - main
+      - pggd-re-usable-workflow
+  pull_request:
+    branches:
+      - main
+      - pggd-re-usable-workflow
+  workflow_dispatch:
+    inputs:
+      deploy_to_production:
+        description: "Set true to deploy to production"
+        required: false
+        default: "false"
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+  build-image:
+    name: Build Docker Image
+    if: ${{ github.event_name != 'workflow_dispatch' }}
+    needs: setup
+    uses: ./.github/workflows/reusable-build-image.yaml
+    secrets: inherit
+
+  deploy-staging:
+    name: Deploy to OpenShift Staging
+    if: ${{ github.event_name != 'workflow_dispatch' }}
+    needs: build-image
+    uses: ./.github/workflows/reusable-deploy.yaml
+    with:
+      environment: staging
+      image_tag: ${{ needs.build-image.outputs.image_tag }}
+      openshift_server: https://cae-np-rtp2-console.cisco.com
+    secrets:
+      CONJUR_HOST_PRIV_ID: ${{ secrets.CONJUR_HOST_PRIV_ID }}
+      CONJUR_HOST_PRIV_KEY: ${{ secrets.CONJUR_HOST_PRIV_KEY }}
+
+  deploy-production:
+    name: Deploy to OpenShift Production
+    if: ${{ github.event_name == 'workflow_dispatch' }}
+    needs: setup
+    uses: ./.github/workflows/reusable-deploy.yaml
+    with:
+      environment: production
+      image_tag: ${{ github.event.inputs.deploy_to_production }}
+      openshift_server: https://cae-prd-rtp-console.cisco.com
+    secrets:
+      CONJUR_HOST_PRIV_ID: ${{ secrets.CONJUR_HOST_PRIV_ID }}
+      CONJUR_HOST_PRIV_KEY: ${{ secrets.CONJUR_HOST_PRIV_KEY }}
 
